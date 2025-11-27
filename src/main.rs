@@ -5,6 +5,8 @@ use rfd::FileDialog;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::thread;
 use uuid::Uuid;
 
 const COLLISION_GAP: f32 = 2.0; // Small gap between blocks
@@ -86,10 +88,21 @@ struct CanvasApp {
     last_dragged_id: Option<Uuid>,
     /// Timestamp of the last interaction with a chained block
     last_chain_interaction: f64,
+    /// Channel for receiving loaded images from background threads
+    image_rx: Receiver<ImageLoadResult>,
+    /// Sender to clone for background threads
+    image_tx: Sender<ImageLoadResult>,
+}
+
+struct ImageLoadResult {
+    id: Uuid,
+    content: BlockContent,
+    size: Vec2,
 }
 
 impl Default for CanvasApp {
     fn default() -> Self {
+        let (tx, rx) = channel();
         Self {
             viewport: Viewport {
                 pan: Vec2::ZERO,
@@ -101,6 +114,8 @@ impl Default for CanvasApp {
             focus_request: None,
             last_dragged_id: None,
             last_chain_interaction: 0.0,
+            image_rx: rx,
+            image_tx: tx,
         }
     }
 }
@@ -157,6 +172,20 @@ impl Block {
 
 impl eframe::App for CanvasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll for loaded images
+        while let Ok(result) = self.image_rx.try_recv() {
+            let center_world = -self.viewport.pan;
+            let pos = self.find_free_rect(center_world, result.size);
+            
+            self.blocks.push(Block {
+                id: result.id,
+                rect: Rect::from_min_size(pos.to_pos2(), result.size),
+                content: result.content,
+                chained: false,
+                selected: false,
+            });
+        }
+
         // Repaint constantly to keep physics/animations smooth
         if !self.blocks.is_empty() {
             ctx.request_repaint();
@@ -213,14 +242,17 @@ impl eframe::App for CanvasApp {
         // 3. Top Toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.button("➕ Add Text").clicked() {
+                if ui.button("🔤").on_hover_text("Add Text").clicked() {
                     self.spawn_text_block(ui.ctx());
                 }
-                if ui.button("🖼 Add Image").clicked() {
+                if ui.button("🖼").on_hover_text("Add Image").clicked() {
                     self.spawn_image_block(ui.ctx());
                 }
-                ui.separator();
-                ui.label("LMB: Move/Select/GIF_animation | RMB (Hold): Resize | Scroll: Zoom | MMB: Pan");
+                
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label("LMB: Move/Toggle GIF | RMB: Resize | Scroll: Zoom | MMB: Pan");
+                    ui.separator();
+                });
             });
         });
 
@@ -278,7 +310,7 @@ impl CanvasApp {
                         initial_mouse_pos: m_pos,
                         initial_block_rect: block.rect,
                     });
-                    
+
                     // Track resized block as "dragged" for collision resolution
                     self.last_dragged_id = Some(block.id);
                 }
@@ -415,14 +447,23 @@ impl CanvasApp {
             let padding = 4.0 * zoom;
             let top_right = screen_rect.right_top();
 
-            let close_rect_center = top_right + Vec2::new(-btn_size / 2.0 - padding, btn_size / 2.0 + padding);
+            let close_rect_center =
+                top_right + Vec2::new(-btn_size / 2.0 - padding, btn_size / 2.0 + padding);
             let close_rect = Rect::from_center_size(close_rect_center, Vec2::splat(btn_size));
 
             let chain_rect_center = close_rect_center - Vec2::new(btn_size + padding, 0.0);
             let chain_rect = Rect::from_center_size(chain_rect_center, Vec2::splat(btn_size));
 
-            let close_hovered = if let Some(ptr) = mouse_pos { close_rect.contains(ptr) } else { false };
-            let chain_hovered = if let Some(ptr) = mouse_pos { chain_rect.contains(ptr) } else { false };
+            let close_hovered = if let Some(ptr) = mouse_pos {
+                close_rect.contains(ptr)
+            } else {
+                false
+            };
+            let chain_hovered = if let Some(ptr) = mouse_pos {
+                chain_rect.contains(ptr)
+            } else {
+                false
+            };
 
             // Drag Move Logic captured here, applied after loop
             if response.dragged() && !secondary_down && !ui.input(|i| i.pointer.middle_down()) {
@@ -498,8 +539,13 @@ impl CanvasApp {
 
             // Hover Overlays (Close / chain)
             if response.hovered() || response.dragged() || b_chained {
-                let close_col = if close_hovered { Color32::from_rgb(255, 100, 100) } else { Color32::RED };
-                ui.painter().circle_filled(close_rect.center(), btn_size / 2.0, close_col);
+                let close_col = if close_hovered {
+                    Color32::from_rgb(255, 100, 100)
+                } else {
+                    Color32::RED
+                };
+                ui.painter()
+                    .circle_filled(close_rect.center(), btn_size / 2.0, close_col);
                 ui.painter().text(
                     close_rect.center(),
                     Align2::CENTER_CENTER,
@@ -515,8 +561,9 @@ impl CanvasApp {
                 } else {
                     Color32::GRAY
                 };
-                
-                ui.painter().circle_filled(chain_rect.center(), btn_size / 2.0, link_col);
+
+                ui.painter()
+                    .circle_filled(chain_rect.center(), btn_size / 2.0, link_col);
                 ui.painter().text(
                     chain_rect.center(),
                     Align2::CENTER_CENTER,
@@ -555,22 +602,25 @@ impl CanvasApp {
             }
         }
 
-        if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) || i.pointer.button_released(egui::PointerButton::Secondary)) {
-             if let Some(dragged_id) = self.last_dragged_id {
-                 if let Some(idx) = self.blocks.iter().position(|b| b.id == dragged_id) {
-                     let others = self.blocks.clone();
-                     self.blocks[idx].resolve_collision(&others);
-                     
-                     if self.blocks[idx].chained {
-                         for i in 0..self.blocks.len() {
-                             if self.blocks[i].chained && i != idx {
-                                 self.blocks[i].resolve_collision(&others);
-                             }
-                         }
-                     }
-                 }
-                 self.last_dragged_id = None;
-             }
+        if ui.input(|i| {
+            i.pointer.button_released(egui::PointerButton::Primary)
+                || i.pointer.button_released(egui::PointerButton::Secondary)
+        }) {
+            if let Some(dragged_id) = self.last_dragged_id {
+                if let Some(idx) = self.blocks.iter().position(|b| b.id == dragged_id) {
+                    let others = self.blocks.clone();
+                    self.blocks[idx].resolve_collision(&others);
+
+                    if self.blocks[idx].chained {
+                        for i in 0..self.blocks.len() {
+                            if self.blocks[i].chained && i != idx {
+                                self.blocks[i].resolve_collision(&others);
+                            }
+                        }
+                    }
+                }
+                self.last_dragged_id = None;
+            }
         }
 
         self.blocks.retain(|b| !ids_to_delete.contains(&b.id));
@@ -590,9 +640,10 @@ impl CanvasApp {
                     b.chained = false;
                 }
             } else {
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(
-                    (10.0 - (time_now - self.last_chain_interaction)).max(0.0),
-                ));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(
+                        (10.0 - (time_now - self.last_chain_interaction)).max(0.0),
+                    ));
             }
         }
     }
@@ -601,7 +652,7 @@ impl CanvasApp {
 
     fn spawn_text_block(&mut self, ctx: &egui::Context) {
         // Find center of current view
-        let rect = ctx.screen_rect();
+        let _rect = ctx.screen_rect();
         let center_world = -self.viewport.pan;
 
         let size = Vec2::new(200.0, 100.0);
@@ -623,84 +674,89 @@ impl CanvasApp {
             .add_filter("Image", &["png", "jpg", "jpeg", "gif"])
             .pick_file()
         {
-            let id = Uuid::new_v4();
-            let is_gif = path
-                .extension()
-                .map_or(false, |e| e.to_string_lossy().to_lowercase() == "gif");
+            let ctx = ctx.clone();
+            let tx = self.image_tx.clone();
+            
+            thread::spawn(move || {
+                let id = Uuid::new_v4();
+                let is_gif = path
+                    .extension()
+                    .map_or(false, |e| e.to_string_lossy().to_lowercase() == "gif");
 
-            let mut texture_frames = vec![];
-            let mut delays = vec![];
-            let mut aspect = 1.0;
+                let mut texture_frames = vec![];
+                let mut delays = vec![];
+                let mut aspect = 1.0;
 
-            if is_gif {
-                if let Ok(f) = File::open(&path) {
-                    let reader = BufReader::new(f);
-                    let decoder = image::codecs::gif::GifDecoder::new(reader).ok();
-                    if let Some(dec) = decoder {
-                        let frames = dec.into_frames().collect_frames();
-                        if let Ok(frames) = frames {
-                            for (i, frame) in frames.iter().enumerate() {
-                                let buffer = frame.buffer();
-                                let size = [buffer.width() as usize, buffer.height() as usize];
-                                if i == 0 {
-                                    aspect = size[0] as f32 / size[1] as f32;
+                if is_gif {
+                    if let Ok(f) = File::open(&path) {
+                        let reader = BufReader::new(f);
+                        let decoder = image::codecs::gif::GifDecoder::new(reader).ok();
+                        if let Some(dec) = decoder {
+                            let frames = dec.into_frames().collect_frames();
+                            if let Ok(frames) = frames {
+                                for (i, frame) in frames.iter().enumerate() {
+                                    let buffer = frame.buffer();
+                                    let size = [buffer.width() as usize, buffer.height() as usize];
+                                    if i == 0 {
+                                        aspect = size[0] as f32 / size[1] as f32;
+                                    }
+
+                                    let image = egui::ColorImage::from_rgba_unmultiplied(
+                                        size,
+                                        buffer.as_raw(),
+                                    );
+                                    texture_frames.push(ctx.load_texture(
+                                        format!("gif-{}-{}", id, i),
+                                        image,
+                                        Default::default(),
+                                    ));
+
+                                    let delay_ms = frame.delay().numer_denom_ms();
+                                    delays.push(delay_ms.0 as f64 / 1000.0);
                                 }
-
-                                let image =
-                                    egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw());
-                                texture_frames.push(ctx.load_texture(
-                                    format!("gif-{}-{}", id, i),
-                                    image,
-                                    Default::default(),
-                                ));
-
-                                let delay_ms = frame.delay().numer_denom_ms();
-                                delays.push(delay_ms.0 as f64 / 1000.0);
                             }
                         }
                     }
+                } else {
+                    // Static Image
+                    if let Ok(img) = image::open(&path) {
+                        let buffer = img.to_rgba8();
+                        let size = [buffer.width() as usize, buffer.height() as usize];
+                        aspect = size[0] as f32 / size[1] as f32;
+                        let image = egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw());
+                        texture_frames.push(ctx.load_texture(
+                            format!("img-{}", id),
+                            image,
+                            Default::default(),
+                        ));
+                        delays.push(0.0);
+                    }
                 }
-            } else {
-                // Static Image
-                if let Ok(img) = image::open(&path) {
-                    let buffer = img.to_rgba8();
-                    let size = [buffer.width() as usize, buffer.height() as usize];
-                    aspect = size[0] as f32 / size[1] as f32;
-                    let image = egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw());
-                    texture_frames.push(ctx.load_texture(
-                        format!("img-{}", id),
-                        image,
-                        Default::default(),
-                    ));
-                    delays.push(0.0);
-                }
-            }
 
-            if !texture_frames.is_empty() {
-                let width = 300.0;
-                let height = width / aspect;
-                let size = Vec2::new(width, height);
+                if !texture_frames.is_empty() {
+                    let width = 300.0;
+                    let height = width / aspect;
+                    let size = Vec2::new(width, height);
 
-                // Center of view
-                let rect = ctx.screen_rect();
-                let center_world = -self.viewport.pan;
-                let pos = self.find_free_rect(center_world, size);
-
-                self.blocks.push(Block {
-                    id,
-                    rect: Rect::from_min_size(pos.to_pos2(), size),
-                    content: BlockContent::Image {
+                    let content = BlockContent::Image {
                         frames: texture_frames,
                         frame_delays: delays,
                         aspect_ratio: aspect,
                         playing: true,
                         current_frame_idx: 0,
                         last_frame_time: 0.0,
-                    },
-                    chained: false,
-                    selected: false,
-                });
-            }
+                    };
+
+                    let _ = tx.send(ImageLoadResult {
+                        id,
+                        content,
+                        size,
+                    });
+                    
+                    // Request repaint to show the new block immediately
+                    ctx.request_repaint();
+                }
+            });
         }
     }
 
