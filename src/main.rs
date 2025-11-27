@@ -185,7 +185,7 @@ impl eframe::App for CanvasApp {
         let input = ctx.input(|i| i.clone());
 
         // Zoom (Ctrl + Scroll) or (MMB + Scroll)
-        if (input.modifiers.ctrl || input.pointer.middle_down()) && input.raw_scroll_delta.y.abs() > 0.0 {
+        if input.raw_scroll_delta.y.abs() > 0.0 {
             let factor = 1.0 + input.raw_scroll_delta.y * 0.001;
             let old_zoom = self.viewport.zoom;
             self.viewport.zoom = (self.viewport.zoom * factor).clamp(0.1, 5.0);
@@ -217,7 +217,7 @@ impl eframe::App for CanvasApp {
                     self.spawn_image_block(ui.ctx());
                 }
                 ui.separator();
-                ui.label("LMB: Move/Select/GIF_animation | RMB (Hold): Resize | MMB+Scroll: Zoom | MMB: Pan");
+                ui.label("LMB: Move/Select/GIF_animation | RMB (Hold): Resize | Scroll: Zoom | MMB: Pan");
             });
         });
 
@@ -240,7 +240,6 @@ impl CanvasApp {
         let pan = self.viewport.pan;
 
         let mouse_pos = ui.input(|i| i.pointer.hover_pos());
-        let primary_down = ui.input(|i| i.pointer.primary_down());
         let secondary_down = ui.input(|i| i.pointer.secondary_down());
         let secondary_pressed =
             ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
@@ -408,6 +407,20 @@ impl CanvasApp {
                 interact_captured = true;
             }
 
+            // --- Calculate Button Rects Early ---
+            let btn_size = 16.0 * zoom;
+            let padding = 4.0 * zoom;
+            let top_right = screen_rect.right_top();
+
+            let close_rect_center = top_right + Vec2::new(-btn_size / 2.0 - padding, btn_size / 2.0 + padding);
+            let close_rect = Rect::from_center_size(close_rect_center, Vec2::splat(btn_size));
+
+            let chain_rect_center = close_rect_center - Vec2::new(btn_size + padding, 0.0);
+            let chain_rect = Rect::from_center_size(chain_rect_center, Vec2::splat(btn_size));
+
+            let close_hovered = if let Some(ptr) = mouse_pos { close_rect.contains(ptr) } else { false };
+            let chain_hovered = if let Some(ptr) = mouse_pos { chain_rect.contains(ptr) } else { false };
+
             // Drag Move Logic captured here, applied after loop
             if response.dragged() && !secondary_down && !ui.input(|i| i.pointer.middle_down()) {
                 let delta = response.drag_delta() / zoom;
@@ -450,7 +463,7 @@ impl CanvasApp {
                             Color32::BLACK,
                         );
 
-                        if response.double_clicked() {
+                        if response.double_clicked() && !close_hovered && !chain_hovered {
                             self.editing_id = Some(b_id);
                             self.focus_request = Some(b_id);
                         }
@@ -470,7 +483,7 @@ impl CanvasApp {
                             );
                         }
 
-                        if response.clicked() && !response.dragged() {
+                        if response.clicked() && !close_hovered && !chain_hovered {
                             if let BlockContent::Image { playing, .. } = &mut self.blocks[i].content
                             {
                                 *playing = !*playing;
@@ -482,19 +495,6 @@ impl CanvasApp {
 
             // Hover Overlays (Close / chain)
             if response.hovered() || response.dragged() || b_chained {
-                let btn_size = 16.0 * zoom;
-                let padding = 4.0 * zoom;
-                let top_right = screen_rect.right_top();
-
-                let close_rect_center = top_right + Vec2::new(-btn_size / 2.0 - padding, btn_size / 2.0 + padding);
-                let close_rect = Rect::from_center_size(close_rect_center, Vec2::splat(btn_size));
-
-                let chain_rect_center = close_rect_center - Vec2::new(btn_size + padding, 0.0);
-                let chain_rect = Rect::from_center_size(chain_rect_center, Vec2::splat(btn_size));
-
-                let close_hovered = if let Some(ptr) = mouse_pos { close_rect.contains(ptr) } else { false };
-                let chain_hovered = if let Some(ptr) = mouse_pos { chain_rect.contains(ptr) } else { false };
-
                 let close_col = if close_hovered { Color32::from_rgb(255, 100, 100) } else { Color32::RED };
                 ui.painter().circle_filled(close_rect.center(), btn_size / 2.0, close_col);
                 ui.painter().text(
@@ -522,13 +522,12 @@ impl CanvasApp {
                     Color32::WHITE,
                 );
 
-                if primary_down && ui.input(|inp| inp.pointer.button_clicked(egui::PointerButton::Primary)) {
+                // Handle Button Clicks via response.clicked()
+                if response.clicked() {
                     if close_hovered {
                         ids_to_delete.insert(b_id);
-                        interact_captured = true;
                     } else if chain_hovered {
                         self.blocks[i].chained = !self.blocks[i].chained;
-                        interact_captured = true;
                     }
                 }
             }
