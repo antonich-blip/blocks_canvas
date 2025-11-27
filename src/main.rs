@@ -84,6 +84,8 @@ struct CanvasApp {
     focus_request: Option<Uuid>,
     /// Track the last dragged block to resolve collisions only for it
     last_dragged_id: Option<Uuid>,
+    /// Timestamp of the last interaction with a chained block
+    last_chain_interaction: f64,
 }
 
 impl Default for CanvasApp {
@@ -98,6 +100,7 @@ impl Default for CanvasApp {
             editing_id: None,
             focus_request: None,
             last_dragged_id: None,
+            last_chain_interaction: 0.0,
         }
     }
 }
@@ -528,6 +531,7 @@ impl CanvasApp {
                         ids_to_delete.insert(b_id);
                     } else if chain_hovered {
                         self.blocks[i].chained = !self.blocks[i].chained;
+                        self.last_chain_interaction = ui.input(|i| i.time);
                     }
                 }
             }
@@ -538,6 +542,7 @@ impl CanvasApp {
         if let Some((idx, delta)) = pending_move {
             let mut moved_indices = vec![idx];
             if self.blocks[idx].chained {
+                self.last_chain_interaction = ui.input(|i| i.time);
                 for (i, b) in self.blocks.iter().enumerate() {
                     if i != idx && b.chained {
                         moved_indices.push(i);
@@ -574,6 +579,20 @@ impl CanvasApp {
             self.editing_id = None;
             for b in &mut self.blocks {
                 b.selected = false;
+            }
+        }
+
+        let time_now = ui.input(|i| i.time);
+        let any_chained = self.blocks.iter().any(|b| b.chained);
+        if any_chained {
+            if time_now - self.last_chain_interaction > 10.0 {
+                for b in &mut self.blocks {
+                    b.chained = false;
+                }
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64(
+                    (10.0 - (time_now - self.last_chain_interaction)).max(0.0),
+                ));
             }
         }
     }
@@ -713,19 +732,5 @@ impl BlockContent {
         } else {
             None
         }
-    }
-}
-
-trait ToVec2 {
-    fn to_vec2(self) -> Vec2;
-}
-impl ToVec2 for Pos2 {
-    fn to_vec2(self) -> Vec2 {
-        Vec2::new(self.x, self.y)
-    }
-}
-impl ToVec2 for Vec2 {
-    fn to_vec2(self) -> Vec2 {
-        self
     }
 }
