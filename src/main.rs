@@ -82,6 +82,8 @@ struct CanvasApp {
     editing_id: Option<Uuid>,
     /// Request to focus a specific text widget
     focus_request: Option<Uuid>,
+    /// Track the last dragged block to resolve collisions only for it
+    last_dragged_id: Option<Uuid>,
 }
 
 impl Default for CanvasApp {
@@ -95,6 +97,7 @@ impl Default for CanvasApp {
             resizing_state: None,
             editing_id: None,
             focus_request: None,
+            last_dragged_id: None,
         }
     }
 }
@@ -181,8 +184,8 @@ impl eframe::App for CanvasApp {
         // 2. Handle Global Inputs (Pan/Zoom)
         let input = ctx.input(|i| i.clone());
 
-        // Zoom (Ctrl + Scroll)
-        if input.modifiers.ctrl && input.raw_scroll_delta.y.abs() > 0.0 {
+        // Zoom (Ctrl + Scroll) or (MMB + Scroll)
+        if (input.modifiers.ctrl || input.pointer.middle_down()) && input.raw_scroll_delta.y.abs() > 0.0 {
             let factor = 1.0 + input.raw_scroll_delta.y * 0.001;
             let old_zoom = self.viewport.zoom;
             self.viewport.zoom = (self.viewport.zoom * factor).clamp(0.1, 5.0);
@@ -214,7 +217,7 @@ impl eframe::App for CanvasApp {
                     self.spawn_image_block(ui.ctx());
                 }
                 ui.separator();
-                ui.label("LMB: Move/Select/GIF_animation | RMB (Hold): Resize | Mod+Scroll: Zoom | MMB: Pan");
+                ui.label("LMB: Move/Select/GIF_animation | RMB (Hold): Resize | MMB+Scroll: Zoom | MMB: Pan");
             });
         });
 
@@ -237,7 +240,7 @@ impl CanvasApp {
         let pan = self.viewport.pan;
 
         let mouse_pos = ui.input(|i| i.pointer.hover_pos());
-        let _primary_down = ui.input(|i| i.pointer.primary_down());
+        let primary_down = ui.input(|i| i.pointer.primary_down());
         let secondary_down = ui.input(|i| i.pointer.secondary_down());
         let secondary_pressed =
             ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
@@ -273,6 +276,9 @@ impl CanvasApp {
                         initial_mouse_pos: m_pos,
                         initial_block_rect: block.rect,
                     });
+                    
+                    // Track resized block as "dragged" for collision resolution
+                    self.last_dragged_id = Some(block.id);
                 }
             }
         }
@@ -339,10 +345,6 @@ impl CanvasApp {
 
                     // Apply
                     self.blocks[idx].rect = new_rect;
-
-                    // Resolve collision for resizing block
-                    let others = self.blocks.clone(); // Snapshot for collision check
-                    self.blocks[idx].resolve_collision(&others);
                 }
             }
         }
@@ -410,20 +412,17 @@ impl CanvasApp {
             if response.dragged() && !secondary_down && !ui.input(|i| i.pointer.middle_down()) {
                 let delta = response.drag_delta() / zoom;
                 pending_move = Some((i, delta));
+                self.last_dragged_id = Some(b_id);
             }
 
             // Render Content
-            // Note: We must ensure we don't overlap borrows here.
-            // `is_editing` check helps us choose one mutually exclusive path.
             if is_editing {
-                // Use a child ui to constrain the text edit area
                 let mut child_ui = ui.new_child(
                     egui::UiBuilder::new()
                         .max_rect(screen_rect.shrink(4.0))
                         .layout(egui::Layout::left_to_right(egui::Align::Min)),
                 );
 
-                // We need mutable access for the TextEdit
                 if let Some(text_mut) = self.blocks[i].content.as_text_mut() {
                     let output = egui::TextEdit::multiline(text_mut)
                         .font(egui::FontId::proportional(16.0 * zoom))
@@ -441,10 +440,8 @@ impl CanvasApp {
                     }
                 }
             } else {
-                // Read-only access checks
                 match &self.blocks[i].content {
                     BlockContent::Text { text } => {
-                        // Render text label
                         ui.painter().text(
                             screen_rect.min + Vec2::splat(5.0),
                             Align2::LEFT_TOP,
@@ -461,7 +458,7 @@ impl CanvasApp {
                     BlockContent::Image {
                         frames,
                         current_frame_idx,
-                        playing: _playing, // Rename to underscore to silence warning
+                        playing: _playing,
                         ..
                     } => {
                         if let Some(tex) = frames.get(*current_frame_idx) {
@@ -473,7 +470,6 @@ impl CanvasApp {
                             );
                         }
 
-                        // Play/Pause click
                         if response.clicked() && !response.dragged() {
                             if let BlockContent::Image { playing, .. } = &mut self.blocks[i].content
                             {
@@ -490,20 +486,16 @@ impl CanvasApp {
                 let padding = 4.0 * zoom;
                 let top_right = screen_rect.right_top();
 
-                // Close button (Rightmost)
                 let close_rect_center = top_right + Vec2::new(-btn_size / 2.0 - padding, btn_size / 2.0 + padding);
                 let close_rect = Rect::from_center_size(close_rect_center, Vec2::splat(btn_size));
 
-                // Chain button (Left of Close)
                 let chain_rect_center = close_rect_center - Vec2::new(btn_size + padding, 0.0);
                 let chain_rect = Rect::from_center_size(chain_rect_center, Vec2::splat(btn_size));
 
-                // We use allocate_rect to create a high-priority interaction zone on top of the block
-                let close_response = ui.allocate_rect(close_rect, egui::Sense::click());
-                let chain_response = ui.allocate_rect(chain_rect, egui::Sense::click());
+                let close_hovered = if let Some(ptr) = mouse_pos { close_rect.contains(ptr) } else { false };
+                let chain_hovered = if let Some(ptr) = mouse_pos { chain_rect.contains(ptr) } else { false };
 
-                // Draw Buttons
-                let close_col = if close_response.hovered() { Color32::from_rgb(255, 100, 100) } else { Color32::RED };
+                let close_col = if close_hovered { Color32::from_rgb(255, 100, 100) } else { Color32::RED };
                 ui.painter().circle_filled(close_rect.center(), btn_size / 2.0, close_col);
                 ui.painter().text(
                     close_rect.center(),
@@ -515,7 +507,7 @@ impl CanvasApp {
 
                 let link_col = if b_chained {
                     Color32::GREEN
-                } else if chain_response.hovered() {
+                } else if chain_hovered {
                     Color32::LIGHT_GRAY
                 } else {
                     Color32::GRAY
@@ -530,20 +522,21 @@ impl CanvasApp {
                     Color32::WHITE,
                 );
 
-                if close_response.clicked() {
-                    ids_to_delete.insert(b_id);
-                }
-                if chain_response.clicked() {
-                    self.blocks[i].chained = !self.blocks[i].chained;
+                if primary_down && ui.input(|inp| inp.pointer.button_clicked(egui::PointerButton::Primary)) {
+                    if close_hovered {
+                        ids_to_delete.insert(b_id);
+                        interact_captured = true;
+                    } else if chain_hovered {
+                        self.blocks[i].chained = !self.blocks[i].chained;
+                        interact_captured = true;
+                    }
                 }
             }
         }
 
         // --- 3. Post-Loop Updates ---
 
-        // Apply Movement
         if let Some((idx, delta)) = pending_move {
-            // Identify blocks to move (handled block + group members)
             let mut moved_indices = vec![idx];
             if self.blocks[idx].chained {
                 for (i, b) in self.blocks.iter().enumerate() {
@@ -553,34 +546,33 @@ impl CanvasApp {
                 }
             }
 
-            // Apply Move
             for &i in &moved_indices {
                 self.blocks[i].rect = self.blocks[i].rect.translate(delta);
             }
-
-            // Resolve Collision ONLY if not dragging (or rather, we skip resolution for the active group while dragging)
-            // Requirement: "Blocks cannot overlap ... except while being moved/dragged."
-            // So we DO NOT resolve collision here if we are dragging.
-            // But wait, if we don't resolve, they just clip.
-            // We need to resolve collision when the drag ENDS.
         }
 
-        // Global Collision Resolution (on mouse release)
-        // We check if the primary button was just released.
-        if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary)) {
-             let others = self.blocks.clone();
-             for i in 0..self.blocks.len() {
-                 self.blocks[i].resolve_collision(&others);
+        if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) || i.pointer.button_released(egui::PointerButton::Secondary)) {
+             if let Some(dragged_id) = self.last_dragged_id {
+                 if let Some(idx) = self.blocks.iter().position(|b| b.id == dragged_id) {
+                     let others = self.blocks.clone();
+                     self.blocks[idx].resolve_collision(&others);
+                     
+                     if self.blocks[idx].chained {
+                         for i in 0..self.blocks.len() {
+                             if self.blocks[i].chained && i != idx {
+                                 self.blocks[i].resolve_collision(&others);
+                             }
+                         }
+                     }
+                 }
+                 self.last_dragged_id = None;
              }
         }
 
-        // Remove deleted
         self.blocks.retain(|b| !ids_to_delete.contains(&b.id));
 
-        // Clear interactions
         if ui.input(|i| i.pointer.any_click()) && !interact_captured && !secondary_down {
             self.editing_id = None;
-            // Deselect all if clicked on background
             for b in &mut self.blocks {
                 b.selected = false;
             }
@@ -592,12 +584,12 @@ impl CanvasApp {
     fn spawn_text_block(&mut self, ctx: &egui::Context) {
         // Find center of current view
         let rect = ctx.screen_rect();
-        let center_world = (rect.center().to_vec2() / self.viewport.zoom) - self.viewport.pan;
+        let center_world = -self.viewport.pan;
 
         let size = Vec2::new(200.0, 100.0);
         let pos = self.find_free_rect(center_world, size);
 
-            self.blocks.push(Block {
+        self.blocks.push(Block {
             id: Uuid::new_v4(),
             rect: Rect::from_min_size(pos.to_pos2(), size),
             content: BlockContent::Text {
@@ -673,8 +665,7 @@ impl CanvasApp {
 
                 // Center of view
                 let rect = ctx.screen_rect();
-                let center_world =
-                    (rect.center().to_vec2() / self.viewport.zoom) - self.viewport.pan;
+                let center_world = -self.viewport.pan;
                 let pos = self.find_free_rect(center_world, size);
 
                 self.blocks.push(Block {
