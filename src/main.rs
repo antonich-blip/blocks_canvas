@@ -671,7 +671,7 @@ impl CanvasApp {
 
     fn spawn_image_block(&mut self, ctx: &egui::Context) {
         if let Some(path) = FileDialog::new()
-            .add_filter("Image", &["png", "jpg", "jpeg", "gif"])
+            .add_filter("Image", &["png", "jpg", "jpeg", "gif", "avif"])
             .pick_file()
         {
             let ctx = ctx.clone();
