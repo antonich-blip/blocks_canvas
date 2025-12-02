@@ -703,24 +703,27 @@ impl CanvasApp {
                 let mut delays = vec![];
                 let mut aspect = 1.0;
 
+                let is_gif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
                 if is_gif {
                     // Load animated GIF
                     match File::open(&path) {
                         Ok(file) => {
                             let mut decoder = gif::DecodeOptions::new();
                             decoder.set_color_output(gif::ColorOutput::RGBA);
-                            match decoder.read_info(BufReader::new(file)) {
-                                Ok(mut decoder) => {
-                                    while let Some(frame) = decoder.read_next_frame().unwrap_or(None) {
-                                        let size = [frame.width as usize, frame.height as usize];
-                                        if frames_data.is_empty() {
-                                            aspect = size[0] as f32 / size[1] as f32;
-                                        }
-                                        frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, &frame.buffer));
-                                        delays.push(frame.delay as f64 / 100.0); // GIF delay is in 1/100s
-                                    }
+                            let mut decoder = match decoder.read_info(BufReader::new(file)) {
+                                Ok(d) => d,
+                                Err(e) => {
+                                    eprintln!("GIF decoder error {:?}: {}", path.display(), e);
+                                    return;
                                 }
-                                Err(e) => eprintln!("GIF decoder error {:?}: {}", path.display(), e),
+                            };
+                            while let Some(frame) = decoder.read_next_frame().ok().flatten() {
+                                let size = [frame.width as usize, frame.height as usize];
+                                if frames_data.is_empty() {
+                                    aspect = size[0] as f32 / size[1] as f32;
+                                }
+                                frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, &frame.buffer[..]));
+                                delays.push(frame.delay as f64 / 100.0);
                             }
                         }
                         Err(e) => eprintln!("GIF open error {:?}: {}", path.display(), e),
@@ -732,14 +735,10 @@ impl CanvasApp {
                             let buffer = img.to_rgba8();
                             let size = [buffer.width() as usize, buffer.height() as usize];
                             if size[0] == 0 || size[1] == 0 {
-                                eprintln!("Invalid image dimensions (0 size) for {:?}", path.display());
+                                eprintln!("Invalid image dimensions for {:?}", path.display());
                                 return;
                             }
                             aspect = size[0] as f32 / size[1] as f32;
-                            if !aspect.is_finite() {
-                                eprintln!("Invalid aspect ratio for {:?}", path.display());
-                                return;
-                            }
                             frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw()));
                             delays.push(0.0);
                             eprintln!("Decoded static image: {:?} size {}x{}", path.display(), size[0], size[1]);
