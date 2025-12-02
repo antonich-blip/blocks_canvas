@@ -11,6 +11,7 @@ gif = "0.14"
 image = { version = "0.25.9", features = ["jpeg", "png", "avif", "default", "avif-native"] }
 libavif = "0.14.0"
 libavif-sys = "0.17.0"
+egui_commonmark = "0.18"
 
 # File Dialog
 rfd = "0.15"

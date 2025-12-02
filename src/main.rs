@@ -8,6 +8,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use uuid::Uuid;
 use libavif_sys; // Ensure this is available
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 const COLLISION_GAP: f32 = 2.0; // Small gap between blocks
 const MIN_BLOCK_SIZE: f32 = 50.0;
@@ -95,6 +96,8 @@ struct CanvasApp {
     image_tx: Sender<ImageLoadData>,
     /// Is the counter tool active?
     counter_tool_active: bool,
+    /// Cache for markdown rendering
+    common_mark_cache: CommonMarkCache,
 }
 
 #[derive(Clone)]
@@ -121,6 +124,7 @@ impl Default for CanvasApp {
             image_rx: rx,
             image_tx: tx,
             counter_tool_active: false,
+            common_mark_cache: CommonMarkCache::default(),
         }
     }
 }
@@ -532,13 +536,20 @@ impl CanvasApp {
             } else {
                 match &mut self.blocks[i].content {
                     BlockContent::Text { text } => {
-                        ui.painter().text(
-                            screen_rect.min + Vec2::splat(5.0),
-                            Align2::LEFT_TOP,
-                            text.as_str(),
-                            egui::FontId::proportional(16.0 * zoom),
-                            Color32::BLACK,
+                        // Render Markdown
+                        let mut child_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(screen_rect.shrink(5.0 * zoom)) // Padding
+                                .layout(egui::Layout::left_to_right(egui::Align::Min)),
                         );
+                        
+                        // Scale text with zoom by modifying local style
+                        for (_text_style, font_id) in child_ui.style_mut().text_styles.iter_mut() {
+                            font_id.size *= zoom;
+                        }
+                        
+                        CommonMarkViewer::new()
+                            .show(&mut child_ui, &mut self.common_mark_cache, text);
 
                         if response.double_clicked() && !close_hovered && !chain_hovered {
                             self.editing_id = Some(b_id);
