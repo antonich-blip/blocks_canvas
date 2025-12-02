@@ -26,6 +26,7 @@
     *   **Save/Load:** Session persistence.
     *   **Add Text/Image:** Spawn blocks.
     *   **Counter:** Toggle counting mode.
+    *   **Reset:** Reset all image counters to zero.
     *   **Help:** Show controls.
 8.  **Block UI:**
     *   Top-right corner buttons (visible on hover/interaction):
@@ -36,6 +37,7 @@
     *   **Auto-Unchain:** If a chained group is inactive for 10 seconds, it automatically unchains (reverts to individual blocks).
 10. **Tools:**
     *   **Counter:** Visual counting on images (Green circle with number).
+    *   **Reset:** Reset all image counters to zero.
 11. **Persistence:**
     *   **Save/Load:** Save canvas state to JSON (preserves text, image paths, counters).
 12. **Future Features:**
@@ -101,6 +103,7 @@ cargo run
     *   Load session from JSON.
 *   **Tools:**
     *   **Counter:** Visual counting on images.
+    *   **Reset:** Reset all image counters to zero.
     *   **Help:** In-app help window.
 *   **UI:**
     *   Hover buttons ('x', 'o') working correctly.
@@ -122,6 +125,7 @@ cargo run
     *   Load session from file.
 *   **Tools:**
     *   Counter tool for images.
+    *   Reset tool to clear all counters.
     *   Help window.
 
 **Phase 3: Visual Polish & Themes (Future)**
