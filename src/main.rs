@@ -1,10 +1,9 @@
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Rect, Stroke, Vec2};
-use image::AnimationDecoder;
+
 use rfd::FileDialog;
 use std::collections::HashSet;
-use std::fs::File;
-use std::io::BufReader;
+
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use uuid::Uuid;
@@ -88,16 +87,17 @@ struct CanvasApp {
     last_dragged_id: Option<Uuid>,
     /// Timestamp of the last interaction with a chained block
     last_chain_interaction: f64,
-    /// Channel for receiving loaded images from background threads
-    image_rx: Receiver<ImageLoadResult>,
+    /// Channel for receiving loaded image data from background threads
+    image_rx: Receiver<ImageLoadData>,
     /// Sender to clone for background threads
-    image_tx: Sender<ImageLoadResult>,
+    image_tx: Sender<ImageLoadData>,
 }
 
-struct ImageLoadResult {
-    id: Uuid,
-    content: BlockContent,
-    size: Vec2,
+#[derive(Clone)]
+struct ImageLoadData {
+    frames: Vec<egui::ColorImage>,
+    frame_delays: Vec<f64>,
+    aspect_ratio: f32,
 }
 
 impl Default for CanvasApp {
@@ -172,15 +172,35 @@ impl Block {
 
 impl eframe::App for CanvasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Poll for loaded images
-        while let Ok(result) = self.image_rx.try_recv() {
+        // Poll for loaded image data and create textures
+        while let Ok(data) = self.image_rx.try_recv() {
+            if data.frames.is_empty() {
+                continue;
+            }
+            let id = Uuid::new_v4();
+            let texture_frames: Vec<_> = data.frames.iter().enumerate().map(|(i, img)| {
+                ctx.load_texture(
+                    format!("img-{id}-{i}"),
+                    img.clone(),
+                    egui::TextureOptions::default(),
+                )
+            }).collect();
+            let width = 300.0;
+            let height = width / data.aspect_ratio;
+            let size = Vec2::new(width, height);
             let center_world = -self.viewport.pan;
-            let pos = self.find_free_rect(center_world, result.size);
-            
+            let pos = self.find_free_rect(center_world, size);
             self.blocks.push(Block {
-                id: result.id,
-                rect: Rect::from_min_size(pos.to_pos2(), result.size),
-                content: result.content,
+                id,
+                rect: Rect::from_min_size(pos.to_pos2(), size),
+                content: BlockContent::Image {
+                    frames: texture_frames,
+                    frame_delays: data.frame_delays,
+                    aspect_ratio: data.aspect_ratio,
+                    playing: data.frames.len() > 1,
+                    current_frame_idx: 0,
+                    last_frame_time: 0.0,
+                },
                 chained: false,
                 selected: false,
             });
@@ -674,87 +694,38 @@ impl CanvasApp {
             .add_filter("Image", &["png", "jpg", "jpeg", "gif", "avif"])
             .pick_file()
         {
-            let ctx = ctx.clone();
+            let _ctx = ctx.clone();
             let tx = self.image_tx.clone();
-            
-            thread::spawn(move || {
-                let id = Uuid::new_v4();
-                let is_gif = path
-                    .extension()
-                    .map_or(false, |e| e.to_string_lossy().to_lowercase() == "gif");
 
-                let mut texture_frames = vec![];
+            thread::spawn(move || {
+                let _is_gif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
+                let mut frames_data = vec![];
                 let mut delays = vec![];
                 let mut aspect = 1.0;
 
-                if is_gif {
-                    if let Ok(f) = File::open(&path) {
-                        let reader = BufReader::new(f);
-                        let decoder = image::codecs::gif::GifDecoder::new(reader).ok();
-                        if let Some(dec) = decoder {
-                            let frames = dec.into_frames().collect_frames();
-                            if let Ok(frames) = frames {
-                                for (i, frame) in frames.iter().enumerate() {
-                                    let buffer = frame.buffer();
-                                    let size = [buffer.width() as usize, buffer.height() as usize];
-                                    if i == 0 {
-                                        aspect = size[0] as f32 / size[1] as f32;
-                                    }
-
-                                    let image = egui::ColorImage::from_rgba_unmultiplied(
-                                        size,
-                                        buffer.as_raw(),
-                                    );
-                                    texture_frames.push(ctx.load_texture(
-                                        format!("gif-{}-{}", id, i),
-                                        image,
-                                        Default::default(),
-                                    ));
-
-                                    let delay_ms = frame.delay().numer_denom_ms();
-                                    delays.push(delay_ms.0 as f64 / 1000.0);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Static Image
-                    if let Ok(img) = image::open(&path) {
+                // Load image (for GIF, only first frame; animation not implemented yet)
+                match image::open(&path) {
+                    Ok(img) => {
                         let buffer = img.to_rgba8();
                         let size = [buffer.width() as usize, buffer.height() as usize];
                         aspect = size[0] as f32 / size[1] as f32;
-                        let image = egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw());
-                        texture_frames.push(ctx.load_texture(
-                            format!("img-{}", id),
-                            image,
-                            Default::default(),
-                        ));
+                        frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw()));
                         delays.push(0.0);
+                        eprintln!("Decoded image: {:?}", path.display());
                     }
+                    Err(e) => eprintln!("Image decode error {:?}: {}", path.display(), e),
                 }
 
-                if !texture_frames.is_empty() {
-                    let width = 300.0;
-                    let height = width / aspect;
-                    let size = Vec2::new(width, height);
-
-                    let content = BlockContent::Image {
-                        frames: texture_frames,
+                if !frames_data.is_empty() {
+                    let frame_count = frames_data.len();
+                    let _ = tx.send(ImageLoadData {
+                        frames: frames_data,
                         frame_delays: delays,
                         aspect_ratio: aspect,
-                        playing: true,
-                        current_frame_idx: 0,
-                        last_frame_time: 0.0,
-                    };
-
-                    let _ = tx.send(ImageLoadResult {
-                        id,
-                        content,
-                        size,
                     });
-                    
-                    // Request repaint to show the new block immediately
-                    ctx.request_repaint();
+                    eprintln!("Sent {} frames for {:?}", frame_count, path.display());
+                } else {
+                    eprintln!("No frames decoded for {:?}", path.display());
                 }
             });
         }
