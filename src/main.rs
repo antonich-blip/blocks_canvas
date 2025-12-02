@@ -317,7 +317,7 @@ impl eframe::App for CanvasApp {
         }
 
         // 3. Toolbar
-        egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("toolbar").frame(egui::Frame::none()).show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(RichText::new("💾").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Save Session").clicked() {
                     self.save_session();
