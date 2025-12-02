@@ -377,14 +377,14 @@ impl eframe::App for CanvasApp {
                     ui.set_style(style);
 
                     ui.heading("Controls");
-                    ui.label("• Pan: Middle Mouse Drag OR Space + Left Mouse Drag");
-                    ui.label("• Zoom: Mouse Wheel");
-                    ui.label("• Move Block: Left Mouse Drag");
-                    ui.label("• Resize Block: Right Mouse Drag (corners)");
-                    ui.label("• Edit Text: Double Click");
-                    ui.label("• Toggle GIF: Click");
-                    ui.label("• Delete Block: Click 'x' handle");
-                    ui.label("• Chain Block: Click 'o' handle (moves together)");
+                    ui.label("• 🖱️ Pan: Middle Mouse Drag OR ⌨️ Space + Left Mouse Drag");
+                    ui.label("• 🔄 Zoom: Mouse Wheel");
+                    ui.label("• 👈 Move Block: Left Mouse Drag");
+                    ui.label("• 👉 Resize Block: Right Mouse Drag (corners)");
+                    ui.label("• 👆👆 Edit Text: Double Click");
+                    ui.label("• 👆 Toggle GIF: Click");
+                    ui.label("• ❌ Delete Block: Click 'x' handle");
+                    ui.label("• 🔗 Chain Block: Click 'o' handle (moves together)");
                     ui.separator();
                     ui.heading("Tools");
                     ui.label("• 💾 Save: Save current session to JSON");
