@@ -731,10 +731,18 @@ impl CanvasApp {
                         Ok(img) => {
                             let buffer = img.to_rgba8();
                             let size = [buffer.width() as usize, buffer.height() as usize];
+                            if size[0] == 0 || size[1] == 0 {
+                                eprintln!("Invalid image dimensions (0 size) for {:?}", path.display());
+                                return;
+                            }
                             aspect = size[0] as f32 / size[1] as f32;
+                            if !aspect.is_finite() {
+                                eprintln!("Invalid aspect ratio for {:?}", path.display());
+                                return;
+                            }
                             frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw()));
                             delays.push(0.0);
-                            eprintln!("Decoded static image: {:?}", path.display());
+                            eprintln!("Decoded static image: {:?} size {}x{}", path.display(), size[0], size[1]);
                         }
                         Err(e) => eprintln!("Static image decode error {:?}: {}", path.display(), e),
                     }
