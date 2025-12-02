@@ -319,22 +319,22 @@ impl eframe::App for CanvasApp {
         // 3. Toolbar
         egui::TopBottomPanel::top("toolbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new("💾").min_size(Vec2::new(36.0, 36.0))).on_hover_text("Save Session").clicked() {
+                if ui.add(egui::Button::new("💾").min_size(Vec2::new(32.0, 32.0))).on_hover_text("Save Session").clicked() {
                     self.save_session();
                 }
-                if ui.add(egui::Button::new("📂").min_size(Vec2::new(36.0, 36.0))).on_hover_text("Load Session").clicked() {
+                if ui.add(egui::Button::new("📂").min_size(Vec2::new(32.0, 32.0))).on_hover_text("Load Session").clicked() {
                     self.load_session();
                 }
                 ui.separator();
 
-                if ui.add(egui::Button::new("🔤").min_size(Vec2::new(36.0, 36.0))).on_hover_text("Add Text").clicked() {
+                if ui.add(egui::Button::new("🔤").min_size(Vec2::new(32.0, 32.0))).on_hover_text("Add Text").clicked() {
                     self.spawn_text_block(ui.ctx());
                 }
-                if ui.add(egui::Button::new("🖼").min_size(Vec2::new(36.0, 36.0))).on_hover_text("Add Image").clicked() {
+                if ui.add(egui::Button::new("🖼").min_size(Vec2::new(32.0, 32.0))).on_hover_text("Add Image").clicked() {
                     self.spawn_image_block(ui.ctx());
                 }
 
-                let mut btn = egui::Button::new("🔢").min_size(Vec2::new(36.0, 36.0));
+                let mut btn = egui::Button::new("🔢").min_size(Vec2::new(32.0, 32.0));
                 if self.counter_tool_active {
                     btn = btn.fill(Color32::LIGHT_GREEN);
                 }
@@ -342,12 +342,12 @@ impl eframe::App for CanvasApp {
                     self.counter_tool_active = !self.counter_tool_active;
                 }
 
-                if ui.add(egui::Button::new("🔄").min_size(Vec2::new(36.0, 36.0))).on_hover_text("Reset All Counters").clicked() {
+                if ui.add(egui::Button::new("🔄").min_size(Vec2::new(32.0, 32.0))).on_hover_text("Reset All Counters").clicked() {
                     self.reset_all_counters();
                 }
 
                 ui.separator();
-                if ui.add(egui::Button::new("❓").min_size(Vec2::new(36.0, 36.0))).on_hover_text("Help").clicked() {
+                if ui.add(egui::Button::new("❓").min_size(Vec2::new(32.0, 32.0))).on_hover_text("Help").clicked() {
                     self.show_help = !self.show_help;
                     help_toggled = true;
                 }
