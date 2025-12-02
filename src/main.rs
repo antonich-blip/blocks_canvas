@@ -368,6 +368,14 @@ impl eframe::App for CanvasApp {
                 .collapsible(false)
                 .show(ctx, |ui| {
                     help_layer_id = Some(ui.layer_id());
+
+                    // Increase text sizes by 1.5x
+                    let mut style = egui::Style::default();
+                    for (_text_style, font_id) in style.text_styles.iter_mut() {
+                        font_id.size *= 1.5;
+                    }
+                    ui.set_style(style);
+
                     ui.heading("Controls");
                     ui.label("• Pan: Middle Mouse Drag OR Space + Left Mouse Drag");
                     ui.label("• Zoom: Mouse Wheel");
