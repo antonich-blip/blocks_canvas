@@ -19,7 +19,14 @@
     *   **Scroll:** Zoom in/out (zooms background and all objects, text size).
     *   **LMB + Click (GIF):** Toggle animation.
     *   **Double Click (Text):** Edit text.
-7.  **Toolbar:** Located at the top. Contains "Add Text" and "Add Image" buttons.
+    *   **Counter Tool Active:**
+        *   **LMB (Image):** Add/Increment counter.
+        *   **RMB (Image):** Decrement counter.
+7.  **Toolbar:** Located at the top. Contains:
+    *   **Save/Load:** Session persistence.
+    *   **Add Text/Image:** Spawn blocks.
+    *   **Counter:** Toggle counting mode.
+    *   **Help:** Show controls.
 8.  **Block UI:**
     *   Top-right corner buttons (visible on hover/interaction):
         *   'x': Close/Delete block.
@@ -27,9 +34,12 @@
 9.  **Chaining (Grouping):**
     *   Blocks with the 'chain' ('o') toggled on (green border) move together as a group.
     *   **Auto-Unchain:** If a chained group is inactive for 10 seconds, it automatically unchains (reverts to individual blocks).
-10. **Future Features:**
+10. **Tools:**
+    *   **Counter:** Visual counting on images (Green circle with number).
+11. **Persistence:**
+    *   **Save/Load:** Save canvas state to JSON (preserves text, image paths, counters).
+12. **Future Features:**
     *   Dark/Light themes.
-    *   Save session to file.
     *   Export to .md, .pdf, .jpeg.
 
 ---
@@ -71,7 +81,7 @@ cargo run
 *   **Collision:** Custom AABB collision resolution with iterative solver.
 *   **Build:** `cargo`, desktop-only target.
 
-#### Current Status (Completed - Phase 1)
+#### Current Status (Completed - Phase 2)
 *   **Framework:** `eframe` setup with infinite scrolling (pan) and zooming.
 *   **Blocks:** Text and Image blocks (static & GIF) spawning.
 *   **Interactions:**
@@ -86,9 +96,15 @@ cargo run
     *   Toggle 'o' button to chain blocks.
     *   Moving one chained block moves all others.
     *   **Auto-Unchain:** 10-second inactivity timer automatically unchains blocks.
+*   **Persistence:**
+    *   Save session to JSON.
+    *   Load session from JSON.
+*   **Tools:**
+    *   **Counter:** Visual counting on images.
+    *   **Help:** In-app help window.
 *   **UI:**
     *   Hover buttons ('x', 'o') working correctly.
-    *   Toolbar with "Add Text" and "Add Image".
+    *   Toolbar with icons for all actions.
 
 #### Development Phases
 
@@ -99,14 +115,14 @@ cargo run
 *   Refined mouse mappings (Zoom on scroll, RMB resize).
 *   Implemented basic chaining with auto-unchain timeout.
 
-**Phase 2: Advanced Grouping & Persistence (Next Steps)**
-*   *Goal: Robust grouping and Save/Load.*
-*   **Advanced Chaining:**
-    *   (Optional) Click outside group to unchain immediately.
-    *   (Optional) Persistent groups that don't timeout.
+**Phase 2: Persistence & Tools (Completed)**
+*   *Goal: Robust grouping, Save/Load, and Utility Tools.*
 *   **Persistence:**
     *   Save current session to JSON.
     *   Load session from file.
+*   **Tools:**
+    *   Counter tool for images.
+    *   Help window.
 
 **Phase 3: Visual Polish & Themes (Future)**
 *   *Goal: Requirement 11 and UI/UX.*
