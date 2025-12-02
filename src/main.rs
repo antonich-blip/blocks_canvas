@@ -3,10 +3,11 @@ use egui::{Align2, Color32, Pos2, Rect, Stroke, Vec2};
 use rfd::FileDialog;
 use std::collections::HashSet;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use uuid::Uuid;
+use libavif_sys; // Ensure this is available
 
 const COLLISION_GAP: f32 = 2.0; // Small gap between blocks
 const MIN_BLOCK_SIZE: f32 = 50.0;
@@ -56,6 +57,7 @@ enum BlockContent {
         playing: bool,
         current_frame_idx: usize,
         last_frame_time: f64,
+        counter: i32,
     },
 }
 
@@ -91,6 +93,8 @@ struct CanvasApp {
     image_rx: Receiver<ImageLoadData>,
     /// Sender to clone for background threads
     image_tx: Sender<ImageLoadData>,
+    /// Is the counter tool active?
+    counter_tool_active: bool,
 }
 
 #[derive(Clone)]
@@ -116,6 +120,7 @@ impl Default for CanvasApp {
             last_chain_interaction: 0.0,
             image_rx: rx,
             image_tx: tx,
+            counter_tool_active: false,
         }
     }
 }
@@ -200,6 +205,7 @@ impl eframe::App for CanvasApp {
                     playing: data.frames.len() > 1,
                     current_frame_idx: 0,
                     last_frame_time: 0.0,
+                    counter: 0,
                 },
                 chained: false,
                 selected: false,
@@ -269,6 +275,11 @@ impl eframe::App for CanvasApp {
                     self.spawn_image_block(ui.ctx());
                 }
                 
+                let btn_color = if self.counter_tool_active { Color32::LIGHT_GREEN } else { Color32::GRAY };
+                if ui.add(egui::Button::new("🔢").fill(btn_color)).on_hover_text("Counter Tool").clicked() {
+                    self.counter_tool_active = !self.counter_tool_active;
+                }
+
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label("LMB: Move/Toggle GIF | RMB: Resize | Scroll: Zoom | MMB: Pan");
                     ui.separator();
@@ -303,7 +314,7 @@ impl CanvasApp {
 
         // --- 1. Resize Logic (Right Mouse Hold) ---
 
-        if secondary_pressed {
+        if secondary_pressed && !self.counter_tool_active {
             // Check if we clicked inside a block to start resizing
             if let Some(m_pos) = mouse_pos {
                 // Convert mouse to world
@@ -451,6 +462,8 @@ impl CanvasApp {
             // Interaction Logic
             let sense = if is_editing {
                 egui::Sense::hover()
+            } else if self.counter_tool_active {
+                egui::Sense::click()
             } else {
                 egui::Sense::click_and_drag()
             };
@@ -517,12 +530,12 @@ impl CanvasApp {
                     }
                 }
             } else {
-                match &self.blocks[i].content {
+                match &mut self.blocks[i].content {
                     BlockContent::Text { text } => {
                         ui.painter().text(
                             screen_rect.min + Vec2::splat(5.0),
                             Align2::LEFT_TOP,
-                            text,
+                            text.as_str(),
                             egui::FontId::proportional(16.0 * zoom),
                             Color32::BLACK,
                         );
@@ -535,7 +548,8 @@ impl CanvasApp {
                     BlockContent::Image {
                         frames,
                         current_frame_idx,
-                        playing: _playing,
+                        playing,
+                        counter,
                         ..
                     } => {
                         if let Some(tex) = frames.get(*current_frame_idx) {
@@ -547,11 +561,28 @@ impl CanvasApp {
                             );
                         }
 
-                        if response.clicked() && !close_hovered && !chain_hovered {
-                            if let BlockContent::Image { playing, .. } = &mut self.blocks[i].content
-                            {
-                                *playing = !*playing;
+                        // Draw Counter if > 0
+                        if *counter > 0 {
+                            let circle_radius = 15.0 * zoom;
+                            let circle_center = screen_rect.min + Vec2::new(circle_radius + 5.0, circle_radius + 5.0);
+                            ui.painter().circle_filled(circle_center, circle_radius, Color32::GREEN);
+                            ui.painter().text(
+                                circle_center,
+                                Align2::CENTER_CENTER,
+                                counter.to_string(),
+                                egui::FontId::proportional(20.0 * zoom),
+                                Color32::BLACK,
+                            );
+                        }
+
+                        if self.counter_tool_active {
+                            if response.clicked() {
+                                *counter += 1;
+                            } else if response.secondary_clicked() {
+                                *counter = (*counter - 1).max(0);
                             }
+                        } else if response.clicked() && !close_hovered && !chain_hovered {
+                            *playing = !*playing;
                         }
                     }
                 }
@@ -699,11 +730,11 @@ impl CanvasApp {
 
             thread::spawn(move || {
                 let is_gif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
+                let is_avif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "avif");
                 let mut frames_data = vec![];
                 let mut delays = vec![];
                 let mut aspect = 1.0;
 
-                let is_gif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
                 if is_gif {
                     // Load animated GIF
                     match File::open(&path) {
@@ -727,6 +758,78 @@ impl CanvasApp {
                             }
                         }
                         Err(e) => eprintln!("GIF open error {:?}: {}", path.display(), e),
+                    }
+                } else if is_avif {
+                    // Load animated AVIF using libavif-sys
+                    match File::open(&path) {
+                        Ok(mut file) => {
+                            let mut buffer = Vec::new();
+                            if let Err(e) = file.read_to_end(&mut buffer) {
+                                eprintln!("Failed to read AVIF file: {}", e);
+                                return;
+                            }
+
+                            unsafe {
+                                let decoder = libavif_sys::avifDecoderCreate();
+                                if decoder.is_null() {
+                                    eprintln!("Failed to create AVIF decoder");
+                                    return;
+                                }
+
+                                let result = libavif_sys::avifDecoderSetIOMemory(decoder, buffer.as_ptr(), buffer.len());
+                                if result != libavif_sys::AVIF_RESULT_OK {
+                                    eprintln!("avifDecoderSetIOMemory failed: {}", result);
+                                    libavif_sys::avifDecoderDestroy(decoder);
+                                    return;
+                                }
+
+                                let result = libavif_sys::avifDecoderParse(decoder);
+                                if result != libavif_sys::AVIF_RESULT_OK {
+                                    eprintln!("avifDecoderParse failed: {}", result);
+                                    libavif_sys::avifDecoderDestroy(decoder);
+                                    return;
+                                }
+
+                                while libavif_sys::avifDecoderNextImage(decoder) == libavif_sys::AVIF_RESULT_OK {
+                                    let image = (*decoder).image;
+                                    let width = (*image).width;
+                                    let height = (*image).height;
+                                    
+                                    let mut rgb: libavif_sys::avifRGBImage = std::mem::zeroed();
+                                    libavif_sys::avifRGBImageSetDefaults(&mut rgb, image);
+                                    rgb.format = libavif_sys::AVIF_RGB_FORMAT_RGBA;
+                                    rgb.depth = 8;
+                                    
+                                    libavif_sys::avifRGBImageAllocatePixels(&mut rgb);
+                                    libavif_sys::avifImageYUVToRGB(image, &mut rgb);
+                                    
+                                    let size = [width as usize, height as usize];
+                                    if frames_data.is_empty() {
+                                        aspect = size[0] as f32 / size[1] as f32;
+                                    }
+
+                                    let mut packed_pixels = Vec::with_capacity(size[0] * size[1] * 4);
+                                    let pixel_slice = std::slice::from_raw_parts(rgb.pixels, (rgb.rowBytes * height) as usize);
+                                    
+                                    for y in 0..height {
+                                        let src_offset = (y * rgb.rowBytes) as usize;
+                                        let src_row = &pixel_slice[src_offset..src_offset + (width * 4) as usize];
+                                        packed_pixels.extend_from_slice(src_row);
+                                    }
+                                    
+                                    frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, &packed_pixels));
+                                    
+                                    // duration is already in seconds (f64) in this binding
+                                    let duration = (*decoder).imageTiming.duration;
+                                    delays.push(duration);
+
+                                    libavif_sys::avifRGBImageFreePixels(&mut rgb);
+                                }
+                                
+                                libavif_sys::avifDecoderDestroy(decoder);
+                            }
+                        }
+                        Err(e) => eprintln!("AVIF file open error: {}", e),
                     }
                 } else {
                     // Load static image (PNG, JPG, AVIF, etc.)

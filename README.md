@@ -34,6 +34,34 @@
 
 ---
 
+### Build Instructions
+
+#### Prerequisites
+
+To build the application, you need the following system dependencies.
+
+**Linux (Debian/Ubuntu/Pop!_OS):**
+Essential build tools, graphics/windowing libraries, and AVIF support:
+```bash
+sudo apt install build-essential libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libavif-dev nasm
+```
+*Note: `libgtk-3-dev` is required for the file dialogs (`rfd`), and `libxkbcommon-dev` is needed for windowing (`eframe`).*
+
+**macOS:**
+1.  Install Xcode Command Line Tools (if not already installed):
+    ```bash
+    xcode-select --install
+    ```
+2.  Install AVIF dependencies via Homebrew:
+    ```bash
+    brew install libavif nasm
+    ```
+
+#### Running the App
+```bash
+cargo run
+```
+
 ### Project Plan: Canvas Blocks Rust Desktop App
 
 #### Tech Stack
@@ -88,3 +116,5 @@
 #### Risks & Mitigations
 *   **Wayland Input:** Tested on PopOS Cosmic; seems stable.
 *   **Performance:** Culling implemented for off-screen blocks.
+
+LMB: Move/Toggle_GIF | RMB: Resize | Scroll: Zoom | MMB: Pan
