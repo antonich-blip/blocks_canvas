@@ -1,9 +1,9 @@
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Rect, Stroke, Vec2};
-
 use rfd::FileDialog;
 use std::collections::HashSet;
-
+use std::fs::File;
+use std::io::BufReader;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use uuid::Uuid;
@@ -698,22 +698,46 @@ impl CanvasApp {
             let tx = self.image_tx.clone();
 
             thread::spawn(move || {
-                let _is_gif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
+                let is_gif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
                 let mut frames_data = vec![];
                 let mut delays = vec![];
                 let mut aspect = 1.0;
 
-                // Load image (for GIF, only first frame; animation not implemented yet)
-                match image::open(&path) {
-                    Ok(img) => {
-                        let buffer = img.to_rgba8();
-                        let size = [buffer.width() as usize, buffer.height() as usize];
-                        aspect = size[0] as f32 / size[1] as f32;
-                        frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw()));
-                        delays.push(0.0);
-                        eprintln!("Decoded image: {:?}", path.display());
+                if is_gif {
+                    // Load animated GIF
+                    match File::open(&path) {
+                        Ok(file) => {
+                            let mut decoder = gif::DecodeOptions::new();
+                            decoder.set_color_output(gif::ColorOutput::RGBA);
+                            match decoder.read_info(BufReader::new(file)) {
+                                Ok(mut decoder) => {
+                                    while let Some(frame) = decoder.read_next_frame().unwrap_or(None) {
+                                        let size = [frame.width as usize, frame.height as usize];
+                                        if frames_data.is_empty() {
+                                            aspect = size[0] as f32 / size[1] as f32;
+                                        }
+                                        frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, &frame.buffer));
+                                        delays.push(frame.delay as f64 / 100.0); // GIF delay is in 1/100s
+                                    }
+                                }
+                                Err(e) => eprintln!("GIF decoder error {:?}: {}", path.display(), e),
+                            }
+                        }
+                        Err(e) => eprintln!("GIF open error {:?}: {}", path.display(), e),
                     }
-                    Err(e) => eprintln!("Image decode error {:?}: {}", path.display(), e),
+                } else {
+                    // Load static image (PNG, JPG, AVIF, etc.)
+                    match image::open(&path) {
+                        Ok(img) => {
+                            let buffer = img.to_rgba8();
+                            let size = [buffer.width() as usize, buffer.height() as usize];
+                            aspect = size[0] as f32 / size[1] as f32;
+                            frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw()));
+                            delays.push(0.0);
+                            eprintln!("Decoded static image: {:?}", path.display());
+                        }
+                        Err(e) => eprintln!("Static image decode error {:?}: {}", path.display(), e),
+                    }
                 }
 
                 if !frames_data.is_empty() {
