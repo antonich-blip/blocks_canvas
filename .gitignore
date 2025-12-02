@@ -1,1 +1,8 @@
 /target
+
+# Compiled binaries
+check_sys
+check_timescale
+
+# Test images
+*.avif
