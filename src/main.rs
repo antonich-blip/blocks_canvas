@@ -319,6 +319,7 @@ impl eframe::App for CanvasApp {
         // 3. Toolbar
         egui::TopBottomPanel::top("toolbar").frame(egui::Frame::default().fill(Color32::from_rgb(30, 30, 30)).inner_margin(0.0).outer_margin(0.0)).show(ctx, |ui| {
             ui.horizontal(|ui| {
+                ui.add_space(8.0); // Add gap from window edge
                 if ui.add(egui::Button::new(RichText::new("💾").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Save Session").clicked() {
                     self.save_session();
                 }
