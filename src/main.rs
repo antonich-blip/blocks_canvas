@@ -1,5 +1,7 @@
 use eframe::egui;
 use egui::{Align2, Color32, Pos2, Rect, RichText, Stroke, Vec2};
+use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+
 use rfd::FileDialog;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -9,8 +11,6 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use uuid::Uuid;
-use libavif_sys;
-use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
 const COLLISION_GAP: f32 = 2.0;
 const MIN_BLOCK_SIZE: f32 = 50.0;
@@ -139,7 +139,9 @@ struct BlockData {
 
 #[derive(Serialize, Deserialize)]
 enum BlockContentData {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     Image {
         path: String,
         counter: i32,
@@ -218,24 +220,30 @@ impl eframe::App for CanvasApp {
             if data.frames.is_empty() {
                 continue;
             }
-            
-            let texture_frames: Vec<_> = data.frames.iter().enumerate().map(|(i, img)| {
-                ctx.load_texture(
-                    format!("img-{}-{}", Uuid::new_v4(), i),
-                    img.clone(),
-                    egui::TextureOptions::default(),
-                )
-            }).collect();
+
+            let texture_frames: Vec<_> = data
+                .frames
+                .iter()
+                .enumerate()
+                .map(|(i, img)| {
+                    ctx.load_texture(
+                        format!("img-{}-{}", Uuid::new_v4(), i),
+                        img.clone(),
+                        egui::TextureOptions::default(),
+                    )
+                })
+                .collect();
 
             if let Some(target_id) = data.target_block_id {
                 // Update existing block (from session load)
                 if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_id) {
-                    if let BlockContent::Image { 
-                        frames, 
-                        frame_delays, 
-                        aspect_ratio, 
-                        .. 
-                    } = &mut block.content {
+                    if let BlockContent::Image {
+                        frames,
+                        frame_delays,
+                        aspect_ratio,
+                        ..
+                    } = &mut block.content
+                    {
                         *frames = texture_frames;
                         *frame_delays = data.frame_delays;
                         *aspect_ratio = data.aspect_ratio;
@@ -249,7 +257,7 @@ impl eframe::App for CanvasApp {
                 let size = Vec2::new(width, height);
                 let center_world = -self.viewport.pan;
                 let pos = self.find_free_rect(center_world, size);
-                
+
                 self.blocks.push(Block {
                     id,
                     rect: Rect::from_min_size(pos.to_pos2(), size),
@@ -317,41 +325,98 @@ impl eframe::App for CanvasApp {
         }
 
         // 3. Toolbar
-        egui::TopBottomPanel::top("toolbar").frame(egui::Frame::default().fill(Color32::from_rgb(30, 30, 30)).inner_margin(0.0).outer_margin(0.0)).show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                ui.add_space(8.0); // Add gap from window edge
-                if ui.add(egui::Button::new(RichText::new("💾").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Save Session").clicked() {
-                    self.save_session();
-                }
-                if ui.add(egui::Button::new(RichText::new("📂").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Load Session").clicked() {
-                    self.load_session();
-                }
+        egui::TopBottomPanel::top("toolbar")
+            .frame(
+                egui::Frame::default()
+                    .fill(Color32::from_rgb(30, 30, 30))
+                    .inner_margin(0.0)
+                    .outer_margin(0.0),
+            )
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(8.0); // Add gap from window edge
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("💾").size(24.0))
+                                .min_size(Vec2::new(32.0, 32.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Save Session")
+                        .clicked()
+                    {
+                        self.save_session();
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("📂").size(24.0))
+                                .min_size(Vec2::new(32.0, 32.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Load Session")
+                        .clicked()
+                    {
+                        self.load_session();
+                    }
 
-                if ui.add(egui::Button::new(RichText::new("🔤").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Add Text").clicked() {
-                    self.spawn_text_block(ui.ctx());
-                }
-                if ui.add(egui::Button::new(RichText::new("🖼").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Add Image").clicked() {
-                    self.spawn_image_block(ui.ctx());
-                }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("🔤").size(24.0))
+                                .min_size(Vec2::new(32.0, 32.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Add Text")
+                        .clicked()
+                    {
+                        self.spawn_text_block(ui.ctx());
+                    }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("🖼").size(24.0))
+                                .min_size(Vec2::new(32.0, 32.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Add Image")
+                        .clicked()
+                    {
+                        self.spawn_image_block(ui.ctx());
+                    }
 
-                let mut btn = egui::Button::new(RichText::new("🔢").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false);
-                if self.counter_tool_active {
-                    btn = btn.fill(Color32::LIGHT_GREEN);
-                }
-                if ui.add(btn).on_hover_text("Counter Tool").clicked() {
-                    self.counter_tool_active = !self.counter_tool_active;
-                }
+                    let mut btn = egui::Button::new(RichText::new("🔢").size(24.0))
+                        .min_size(Vec2::new(32.0, 32.0))
+                        .frame(false);
+                    if self.counter_tool_active {
+                        btn = btn.fill(Color32::LIGHT_GREEN);
+                    }
+                    if ui.add(btn).on_hover_text("Counter Tool").clicked() {
+                        self.counter_tool_active = !self.counter_tool_active;
+                    }
 
-                if ui.add(egui::Button::new(RichText::new("🔄").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Reset All Counters").clicked() {
-                    self.reset_all_counters();
-                }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("🔄").size(24.0))
+                                .min_size(Vec2::new(32.0, 32.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Reset All Counters")
+                        .clicked()
+                    {
+                        self.reset_all_counters();
+                    }
 
-                if ui.add(egui::Button::new(RichText::new("❓").size(24.0)).min_size(Vec2::new(32.0, 32.0)).frame(false)).on_hover_text("Help").clicked() {
-                    self.show_help = !self.show_help;
-                    help_toggled = true;
-                }
+                    if ui
+                        .add(
+                            egui::Button::new(RichText::new("❓").size(24.0))
+                                .min_size(Vec2::new(32.0, 32.0))
+                                .frame(false),
+                        )
+                        .on_hover_text("Help")
+                        .clicked()
+                    {
+                        self.show_help = !self.show_help;
+                        help_toggled = true;
+                    }
+                });
             });
-        });
 
         // 4. Main Canvas
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -377,12 +442,12 @@ impl eframe::App for CanvasApp {
                     ui.set_style(style);
 
                     ui.heading("Controls");
-                    ui.label("• 🖱️ Pan: Middle Mouse Drag OR ⌨️ Space + 👈 Left Mouse Drag");
-                    ui.label("• 🌀 Zoom: Mouse Wheel");
-                    ui.label("• 👈 Move Block: Left Mouse Drag");
-                    ui.label("• 👉 Resize Block: Right Mouse Drag (corners)");
-                    ui.label("• 👆👆 Edit Text: Double Click");
-                    ui.label("• 👆 Toggle GIF: Click");
+                    ui.label("• ✋ Pan: Middle Mouse Drag OR ⌨️ Space + Left Mouse Drag");
+                    ui.label("• 🔍 Zoom: Mouse Wheel");
+                    ui.label("• ✥ Move Block: Left Mouse Drag");
+                    ui.label("• ↘️ Resize Block: Right Mouse Drag (corners)");
+                    ui.label("• 📝 Edit Text: Double Click");
+                    ui.label("• ⏯️ Toggle GIF: Click");
                     ui.label("• ❌ Delete Block: Click 'x' handle");
                     ui.label("• 🔗 Chain Block: Click 'o' handle (moves together)");
                     ui.separator();
@@ -390,7 +455,7 @@ impl eframe::App for CanvasApp {
                     ui.label("• 💾 Save: Save current session to JSON");
                     ui.label("• 📂 Load: Load session from JSON");
                     ui.label("• 🔤 Text: Add new markdown text block");
-                    ui.label("• 🖼 Image: Add image (PNG, JPG, GIF, AVIF)");
+                    ui.label("• 🖼 Image: Add image (PNG, JPG, GIF, AVIF, WEBP)");
                     ui.label("• 🔢 Counter: Click image to count, Right-click to decrement");
                     ui.label("• 🔄 Reset: Reset all image counters to zero");
                 });
@@ -433,7 +498,12 @@ impl CanvasApp {
         if secondary_pressed && !self.counter_tool_active {
             if let Some(m_pos) = mouse_pos {
                 let world_mouse = (m_pos.to_vec2() - screen_center) / zoom - pan;
-                if let Some(block) = self.blocks.iter().rev().find(|b| b.rect.contains(world_mouse.to_pos2())) {
+                if let Some(block) = self
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find(|b| b.rect.contains(world_mouse.to_pos2()))
+                {
                     let center = block.rect.center();
                     let handle = match (world_mouse.x < center.x, world_mouse.y < center.y) {
                         (true, true) => ResizeHandle::TopLeft,
@@ -484,14 +554,18 @@ impl CanvasApp {
                     }
 
                     if new_rect.width() < min_size {
-                        if state.handle == ResizeHandle::TopLeft || state.handle == ResizeHandle::BottomLeft {
+                        if state.handle == ResizeHandle::TopLeft
+                            || state.handle == ResizeHandle::BottomLeft
+                        {
                             new_rect.min.x = new_rect.max.x - min_size;
                         } else {
                             new_rect.max.x = new_rect.min.x + min_size;
                         }
                     }
                     if new_rect.height() < min_size {
-                        if state.handle == ResizeHandle::TopLeft || state.handle == ResizeHandle::TopRight {
+                        if state.handle == ResizeHandle::TopLeft
+                            || state.handle == ResizeHandle::TopRight
+                        {
                             new_rect.min.y = new_rect.max.y - min_size;
                         } else {
                             new_rect.max.y = new_rect.min.y + min_size;
@@ -523,28 +597,51 @@ impl CanvasApp {
             let screen_size = b_rect.size() * zoom;
             let screen_rect = Rect::from_min_size(screen_pos_min.to_pos2(), screen_size);
 
-            if !screen_rect.intersects(screen_rect) { continue; }
+            if !screen_rect.intersects(screen_rect) {
+                continue;
+            }
 
-            let border_color = if b_selected { Color32::YELLOW } else if b_chained { Color32::GREEN } else { Color32::BLACK };
+            let border_color = if b_selected {
+                Color32::YELLOW
+            } else if b_chained {
+                Color32::GREEN
+            } else {
+                Color32::BLACK
+            };
             let bg_color = Color32::from_rgb(240, 240, 240);
 
             ui.painter().rect_filled(screen_rect, 5.0, bg_color);
-            ui.painter().rect_stroke(screen_rect, 5.0, Stroke::new(2.0, border_color));
+            ui.painter()
+                .rect_stroke(screen_rect, 5.0, Stroke::new(2.0, border_color));
 
             let interact_id = ui.make_persistent_id(b_id);
-            let sense = if is_editing { egui::Sense::hover() } else if self.counter_tool_active { egui::Sense::click() } else { egui::Sense::click_and_drag() };
+            let sense = if is_editing {
+                egui::Sense::hover()
+            } else if self.counter_tool_active {
+                egui::Sense::click()
+            } else {
+                egui::Sense::click_and_drag()
+            };
             let response = ui.interact(screen_rect, interact_id, sense);
 
-            if response.hovered() || response.dragged() { interact_captured = true; }
+            if response.hovered() || response.dragged() {
+                interact_captured = true;
+            }
 
             let btn_size = 16.0 * zoom;
             let padding = 4.0 * zoom;
             let top_right = screen_rect.right_top();
-            let close_rect = Rect::from_center_size(top_right + Vec2::new(-btn_size / 2.0 - padding, btn_size / 2.0 + padding), Vec2::splat(btn_size));
-            let chain_rect = Rect::from_center_size(close_rect.center() - Vec2::new(btn_size + padding, 0.0), Vec2::splat(btn_size));
+            let close_rect = Rect::from_center_size(
+                top_right + Vec2::new(-btn_size / 2.0 - padding, btn_size / 2.0 + padding),
+                Vec2::splat(btn_size),
+            );
+            let chain_rect = Rect::from_center_size(
+                close_rect.center() - Vec2::new(btn_size + padding, 0.0),
+                Vec2::splat(btn_size),
+            );
 
-            let close_hovered = mouse_pos.map_or(false, |p| close_rect.contains(p));
-            let chain_hovered = mouse_pos.map_or(false, |p| chain_rect.contains(p));
+            let close_hovered = mouse_pos.is_some_and(|p| close_rect.contains(p));
+            let chain_hovered = mouse_pos.is_some_and(|p| chain_rect.contains(p));
 
             if response.dragged() && !secondary_down && !ui.input(|i| i.pointer.middle_down()) {
                 let delta = response.drag_delta() / zoom;
@@ -553,7 +650,11 @@ impl CanvasApp {
             }
 
             if is_editing {
-                let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(screen_rect.shrink(4.0)).layout(egui::Layout::left_to_right(egui::Align::Min)));
+                let mut child_ui = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(screen_rect.shrink(4.0))
+                        .layout(egui::Layout::left_to_right(egui::Align::Min)),
+                );
                 if let Some(text_mut) = self.blocks[i].content.as_text_mut() {
                     let output = egui::TextEdit::multiline(text_mut)
                         .font(egui::FontId::proportional(16.0 * zoom))
@@ -571,29 +672,62 @@ impl CanvasApp {
             } else {
                 match &mut self.blocks[i].content {
                     BlockContent::Text { text } => {
-                        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(screen_rect.shrink(5.0 * zoom)).layout(egui::Layout::left_to_right(egui::Align::Min)));
+                        let mut child_ui = ui.new_child(
+                            egui::UiBuilder::new()
+                                .max_rect(screen_rect.shrink(5.0 * zoom))
+                                .layout(egui::Layout::left_to_right(egui::Align::Min)),
+                        );
                         for (_text_style, font_id) in child_ui.style_mut().text_styles.iter_mut() {
                             font_id.size *= zoom;
                         }
-                        CommonMarkViewer::new().show(&mut child_ui, &mut self.common_mark_cache, text);
+                        CommonMarkViewer::new().show(
+                            &mut child_ui,
+                            &mut self.common_mark_cache,
+                            text,
+                        );
                         if response.double_clicked() && !close_hovered && !chain_hovered {
                             self.editing_id = Some(b_id);
                             self.focus_request = Some(b_id);
                         }
                     }
-                    BlockContent::Image { frames, current_frame_idx, playing, counter, .. } => {
+                    BlockContent::Image {
+                        frames,
+                        current_frame_idx,
+                        playing,
+                        counter,
+                        ..
+                    } => {
                         if let Some(tex) = frames.get(*current_frame_idx) {
-                            ui.painter().image(tex.id(), screen_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                            ui.painter().image(
+                                tex.id(),
+                                screen_rect,
+                                Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                Color32::WHITE,
+                            );
                         }
                         if *counter > 0 {
                             let circle_radius = 15.0 * zoom;
-                            let circle_center = screen_rect.min + Vec2::new(circle_radius + 5.0, circle_radius + 5.0);
-                            ui.painter().circle_filled(circle_center, circle_radius, Color32::GREEN);
-                            ui.painter().text(circle_center, Align2::CENTER_CENTER, counter.to_string(), egui::FontId::proportional(20.0 * zoom), Color32::BLACK);
+                            let circle_center = screen_rect.min
+                                + Vec2::new(circle_radius + 5.0, circle_radius + 5.0);
+                            ui.painter().circle_filled(
+                                circle_center,
+                                circle_radius,
+                                Color32::GREEN,
+                            );
+                            ui.painter().text(
+                                circle_center,
+                                Align2::CENTER_CENTER,
+                                counter.to_string(),
+                                egui::FontId::proportional(20.0 * zoom),
+                                Color32::BLACK,
+                            );
                         }
                         if self.counter_tool_active {
-                            if response.clicked() { *counter += 1; }
-                            else if response.secondary_clicked() { *counter = (*counter - 1).max(0); }
+                            if response.clicked() {
+                                *counter += 1;
+                            } else if response.secondary_clicked() {
+                                *counter = (*counter - 1).max(0);
+                            }
                         } else if response.clicked() && !close_hovered && !chain_hovered {
                             *playing = !*playing;
                         }
@@ -602,14 +736,45 @@ impl CanvasApp {
             }
 
             if response.hovered() || response.dragged() || b_chained {
-                ui.painter().circle_filled(close_rect.center(), btn_size / 2.0, if close_hovered { Color32::from_rgb(255, 100, 100) } else { Color32::RED });
-                ui.painter().text(close_rect.center(), Align2::CENTER_CENTER, "x", egui::FontId::monospace(12.0 * zoom), Color32::WHITE);
-                ui.painter().circle_filled(chain_rect.center(), btn_size / 2.0, if b_chained { Color32::GREEN } else if chain_hovered { Color32::LIGHT_GRAY } else { Color32::GRAY });
-                ui.painter().text(chain_rect.center(), Align2::CENTER_CENTER, "o", egui::FontId::monospace(12.0 * zoom), Color32::WHITE);
+                ui.painter().circle_filled(
+                    close_rect.center(),
+                    btn_size / 2.0,
+                    if close_hovered {
+                        Color32::from_rgb(255, 100, 100)
+                    } else {
+                        Color32::RED
+                    },
+                );
+                ui.painter().text(
+                    close_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "x",
+                    egui::FontId::monospace(12.0 * zoom),
+                    Color32::WHITE,
+                );
+                ui.painter().circle_filled(
+                    chain_rect.center(),
+                    btn_size / 2.0,
+                    if b_chained {
+                        Color32::GREEN
+                    } else if chain_hovered {
+                        Color32::LIGHT_GRAY
+                    } else {
+                        Color32::GRAY
+                    },
+                );
+                ui.painter().text(
+                    chain_rect.center(),
+                    Align2::CENTER_CENTER,
+                    "o",
+                    egui::FontId::monospace(12.0 * zoom),
+                    Color32::WHITE,
+                );
 
                 if response.clicked() {
-                    if close_hovered { ids_to_delete.insert(b_id); }
-                    else if chain_hovered {
+                    if close_hovered {
+                        ids_to_delete.insert(b_id);
+                    } else if chain_hovered {
                         self.blocks[i].chained = !self.blocks[i].chained;
                         self.last_chain_interaction = ui.input(|i| i.time);
                     }
@@ -622,7 +787,9 @@ impl CanvasApp {
             if self.blocks[idx].chained {
                 self.last_chain_interaction = ui.input(|i| i.time);
                 for (i, b) in self.blocks.iter().enumerate() {
-                    if i != idx && b.chained { moved_indices.push(i); }
+                    if i != idx && b.chained {
+                        moved_indices.push(i);
+                    }
                 }
             }
             for &i in &moved_indices {
@@ -630,14 +797,19 @@ impl CanvasApp {
             }
         }
 
-        if ui.input(|i| i.pointer.button_released(egui::PointerButton::Primary) || i.pointer.button_released(egui::PointerButton::Secondary)) {
+        if ui.input(|i| {
+            i.pointer.button_released(egui::PointerButton::Primary)
+                || i.pointer.button_released(egui::PointerButton::Secondary)
+        }) {
             if let Some(dragged_id) = self.last_dragged_id {
                 if let Some(idx) = self.blocks.iter().position(|b| b.id == dragged_id) {
                     let others = self.blocks.clone();
                     self.blocks[idx].resolve_collision(&others);
                     if self.blocks[idx].chained {
                         for i in 0..self.blocks.len() {
-                            if self.blocks[i].chained && i != idx { self.blocks[i].resolve_collision(&others); }
+                            if self.blocks[i].chained && i != idx {
+                                self.blocks[i].resolve_collision(&others);
+                            }
                         }
                     }
                 }
@@ -649,15 +821,22 @@ impl CanvasApp {
 
         if ui.input(|i| i.pointer.any_click()) && !interact_captured && !secondary_down {
             self.editing_id = None;
-            for b in &mut self.blocks { b.selected = false; }
+            for b in &mut self.blocks {
+                b.selected = false;
+            }
         }
 
         let time_now = ui.input(|i| i.time);
         if self.blocks.iter().any(|b| b.chained) {
             if time_now - self.last_chain_interaction > 10.0 {
-                for b in &mut self.blocks { b.chained = false; }
+                for b in &mut self.blocks {
+                    b.chained = false;
+                }
             } else {
-                ui.ctx().request_repaint_after(std::time::Duration::from_secs_f64((10.0 - (time_now - self.last_chain_interaction)).max(0.0)));
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_secs_f64(
+                        (10.0 - (time_now - self.last_chain_interaction)).max(0.0),
+                    ));
             }
         }
     }
@@ -669,14 +848,19 @@ impl CanvasApp {
         self.blocks.push(Block {
             id: Uuid::new_v4(),
             rect: Rect::from_min_size(pos.to_pos2(), size),
-            content: BlockContent::Text { text: "Double click to edit...".to_string() },
+            content: BlockContent::Text {
+                text: "Double click to edit...".to_string(),
+            },
             chained: false,
             selected: false,
         });
     }
 
     fn spawn_image_block(&mut self, ctx: &egui::Context) {
-        if let Some(path) = FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "gif", "avif"]).pick_file() {
+        if let Some(path) = FileDialog::new()
+            .add_filter("Image", &["png", "jpg", "jpeg", "gif", "avif", "webp"])
+            .pick_file()
+        {
             self.load_image_file(path, ctx.clone(), None);
         }
     }
@@ -686,8 +870,15 @@ impl CanvasApp {
         let path_str = path.to_string_lossy().to_string();
 
         thread::spawn(move || {
-            let is_gif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
-            let is_avif = path.extension().is_some_and(|e| e.to_string_lossy().to_lowercase() == "avif");
+            let is_gif = path
+                .extension()
+                .is_some_and(|e| e.to_string_lossy().to_lowercase() == "gif");
+            let is_avif = path
+                .extension()
+                .is_some_and(|e| e.to_string_lossy().to_lowercase() == "avif");
+            let is_webp = path
+                .extension()
+                .is_some_and(|e| e.to_string_lossy().to_lowercase() == "webp");
             let mut frames_data = vec![];
             let mut delays = vec![];
             let mut aspect = 1.0;
@@ -700,13 +891,18 @@ impl CanvasApp {
                         if let Ok(mut decoder) = decoder.read_info(BufReader::new(file)) {
                             while let Some(frame) = decoder.read_next_frame().ok().flatten() {
                                 let size = [frame.width as usize, frame.height as usize];
-                                if frames_data.is_empty() { aspect = size[0] as f32 / size[1] as f32; }
-                                frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, &frame.buffer[..]));
+                                if frames_data.is_empty() {
+                                    aspect = size[0] as f32 / size[1] as f32;
+                                }
+                                frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
+                                    size,
+                                    &frame.buffer[..],
+                                ));
                                 delays.push(frame.delay as f64 / 100.0);
                             }
                         }
                     }
-                    Err(e) => eprintln!("GIF open error: {}", e),
+                    Err(e) => eprintln!("GIF open error: {e}"),
                 }
             } else if is_avif {
                 match File::open(&path) {
@@ -716,51 +912,99 @@ impl CanvasApp {
                             unsafe {
                                 let decoder = libavif_sys::avifDecoderCreate();
                                 if !decoder.is_null() {
-                                    if libavif_sys::avifDecoderSetIOMemory(decoder, buffer.as_ptr(), buffer.len()) == libavif_sys::AVIF_RESULT_OK {
-                                        if libavif_sys::avifDecoderParse(decoder) == libavif_sys::AVIF_RESULT_OK {
-                                            while libavif_sys::avifDecoderNextImage(decoder) == libavif_sys::AVIF_RESULT_OK {
+                                    if libavif_sys::avifDecoderSetIOMemory(
+                                        decoder,
+                                        buffer.as_ptr(),
+                                        buffer.len(),
+                                    ) == libavif_sys::AVIF_RESULT_OK
+                                        && libavif_sys::avifDecoderParse(decoder)
+                                            == libavif_sys::AVIF_RESULT_OK
+                                        {
+                                            while libavif_sys::avifDecoderNextImage(decoder)
+                                                == libavif_sys::AVIF_RESULT_OK
+                                            {
                                                 let image = (*decoder).image;
                                                 let width = (*image).width;
                                                 let height = (*image).height;
-                                                let mut rgb: libavif_sys::avifRGBImage = std::mem::zeroed();
-                                                libavif_sys::avifRGBImageSetDefaults(&mut rgb, image);
+                                                let mut rgb: libavif_sys::avifRGBImage =
+                                                    std::mem::zeroed();
+                                                libavif_sys::avifRGBImageSetDefaults(
+                                                    &mut rgb, image,
+                                                );
                                                 rgb.format = libavif_sys::AVIF_RGB_FORMAT_RGBA;
                                                 rgb.depth = 8;
                                                 libavif_sys::avifRGBImageAllocatePixels(&mut rgb);
                                                 libavif_sys::avifImageYUVToRGB(image, &mut rgb);
-                                                
+
                                                 let size = [width as usize, height as usize];
-                                                if frames_data.is_empty() { aspect = size[0] as f32 / size[1] as f32; }
-                                                
-                                                let mut packed_pixels = Vec::with_capacity(size[0] * size[1] * 4);
-                                                let pixel_slice = std::slice::from_raw_parts(rgb.pixels, (rgb.rowBytes * height) as usize);
+                                                if frames_data.is_empty() {
+                                                    aspect = size[0] as f32 / size[1] as f32;
+                                                }
+
+                                                let mut packed_pixels =
+                                                    Vec::with_capacity(size[0] * size[1] * 4);
+                                                let pixel_slice = std::slice::from_raw_parts(
+                                                    rgb.pixels,
+                                                    (rgb.rowBytes * height) as usize,
+                                                );
                                                 for y in 0..height {
                                                     let src_offset = (y * rgb.rowBytes) as usize;
-                                                    let src_row = &pixel_slice[src_offset..src_offset + (width * 4) as usize];
+                                                    let src_row = &pixel_slice[src_offset
+                                                        ..src_offset + (width * 4) as usize];
                                                     packed_pixels.extend_from_slice(src_row);
                                                 }
-                                                frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, &packed_pixels));
+                                                frames_data.push(
+                                                    egui::ColorImage::from_rgba_unmultiplied(
+                                                        size,
+                                                        &packed_pixels,
+                                                    ),
+                                                );
                                                 delays.push((*decoder).imageTiming.duration);
                                                 libavif_sys::avifRGBImageFreePixels(&mut rgb);
                                             }
                                         }
-                                    }
                                     libavif_sys::avifDecoderDestroy(decoder);
                                 }
                             }
                         }
                     }
-                    Err(e) => eprintln!("AVIF open error: {}", e),
+                    Err(e) => eprintln!("AVIF open error: {e}"),
                 }
-            } else {
-                if let Ok(img) = image::open(&path) {
-                    let buffer = img.to_rgba8();
-                    let size = [buffer.width() as usize, buffer.height() as usize];
-                    if size[0] > 0 && size[1] > 0 {
-                        aspect = size[0] as f32 / size[1] as f32;
-                        frames_data.push(egui::ColorImage::from_rgba_unmultiplied(size, buffer.as_raw()));
-                        delays.push(0.0);
+            } else if is_webp {
+                if let Ok(mut file) = File::open(&path) {
+                    let mut buffer = Vec::new();
+                    if file.read_to_end(&mut buffer).is_ok() {
+                        let decoder = webp::AnimDecoder::new(&buffer[..]);
+                        if let Ok(anim) = decoder.decode() {
+                            if anim.len() > 0 {
+                                if let Some(first_frame) = anim.get_frame(0) {
+                                    aspect = first_frame.width() as f32 / first_frame.height() as f32;
+                                }
+                                let delay = if anim.has_animation() { 0.1 } else { 0.0 };
+                                for frame in &anim {
+                                    let img: image::DynamicImage = (&frame).into();
+                                    let buffer = img.to_rgba8();
+                                    let size = [buffer.width() as usize, buffer.height() as usize];
+                                    frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
+                                        size,
+                                        buffer.as_raw(),
+                                    ));
+                                    delays.push(delay);
+                                }
+                            }
+                        }
                     }
+                }
+            } else if let Ok(img) = image::open(&path) {
+                let buffer = img.to_rgba8();
+                let size = [buffer.width() as usize, buffer.height() as usize];
+                if size[0] > 0 && size[1] > 0 {
+                    aspect = size[0] as f32 / size[1] as f32;
+                    frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
+                        size,
+                        buffer.as_raw(),
+                    ));
+                    delays.push(0.0);
                 }
             }
 
@@ -781,7 +1025,9 @@ impl CanvasApp {
         let mut offset = 0.0;
         for _ in 0..10 {
             let candidate = Rect::from_min_size(pos.to_pos2(), size);
-            if !self.blocks.iter().any(|b| b.rect.intersects(candidate)) { return pos; }
+            if !self.blocks.iter().any(|b| b.rect.intersects(candidate)) {
+                return pos;
+            }
             offset += 50.0;
             pos += Vec2::splat(offset);
         }
@@ -799,19 +1045,30 @@ impl CanvasApp {
                     pan: [self.viewport.pan.x, self.viewport.pan.y],
                     zoom: self.viewport.zoom,
                 },
-                blocks: self.blocks.iter().map(|b| BlockData {
-                    id: b.id,
-                    rect: [b.rect.min.x, b.rect.min.y, b.rect.max.x, b.rect.max.y],
-                    chained: b.chained,
-                    content: match &b.content {
-                        BlockContent::Text { text } => BlockContentData::Text { text: text.clone() },
-                        BlockContent::Image { path, counter, playing, .. } => BlockContentData::Image {
-                            path: path.clone().unwrap_or_default(),
-                            counter: *counter,
-                            playing: *playing,
+                blocks: self
+                    .blocks
+                    .iter()
+                    .map(|b| BlockData {
+                        id: b.id,
+                        rect: [b.rect.min.x, b.rect.min.y, b.rect.max.x, b.rect.max.y],
+                        chained: b.chained,
+                        content: match &b.content {
+                            BlockContent::Text { text } => {
+                                BlockContentData::Text { text: text.clone() }
+                            }
+                            BlockContent::Image {
+                                path,
+                                counter,
+                                playing,
+                                ..
+                            } => BlockContentData::Image {
+                                path: path.clone().unwrap_or_default(),
+                                counter: *counter,
+                                playing: *playing,
+                            },
                         },
-                    },
-                }).collect(),
+                    })
+                    .collect(),
             };
 
             if let Ok(file) = File::create(path) {
@@ -844,10 +1101,18 @@ impl CanvasApp {
 
                         let content = match b_data.content {
                             BlockContentData::Text { text } => BlockContent::Text { text },
-                            BlockContentData::Image { path, counter, playing } => {
+                            BlockContentData::Image {
+                                path,
+                                counter,
+                                playing,
+                            } => {
                                 // Trigger async load
                                 if !path.is_empty() {
-                                    self.load_image_file(PathBuf::from(&path), egui::Context::default(), Some(b_data.id));
+                                    self.load_image_file(
+                                        PathBuf::from(&path),
+                                        egui::Context::default(),
+                                        Some(b_data.id),
+                                    );
                                 }
                                 // Create placeholder
                                 BlockContent::Image {
@@ -879,6 +1144,10 @@ impl CanvasApp {
 
 impl BlockContent {
     fn as_text_mut(&mut self) -> Option<&mut String> {
-        if let BlockContent::Text { text } = self { Some(text) } else { None }
+        if let BlockContent::Text { text } = self {
+            Some(text)
+        } else {
+            None
+        }
     }
 }
