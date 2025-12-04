@@ -980,8 +980,22 @@ impl CanvasApp {
                                 if let Some(first_frame) = anim.get_frame(0) {
                                     aspect = first_frame.width() as f32 / first_frame.height() as f32;
                                 }
-                                let delay = if anim.has_animation() { 0.1 } else { 0.0 };
+                                let mut prev_timestamp = 0;
                                 for frame in &anim {
+                                    let timestamp = frame.get_time_ms();
+                                    let delay_ms = timestamp - prev_timestamp;
+                                    let delay = if delay_ms > 0 {
+                                        delay_ms as f64 / 1000.0
+                                    } else {
+                                        // Fallback for invalid or 0 duration in animation
+                                        if anim.has_animation() {
+                                            0.1
+                                        } else {
+                                            0.0
+                                        }
+                                    };
+                                    prev_timestamp = timestamp;
+
                                     let img: image::DynamicImage = (&frame).into();
                                     let buffer = img.to_rgba8();
                                     let size = [buffer.width() as usize, buffer.height() as usize];
