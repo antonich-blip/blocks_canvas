@@ -1,6 +1,14 @@
+# Build artifacts
 /target
+debug/
+*.pdb
+
+# Cargo
+Cargo.lock
+**/*.rs.bk
+
+# Test files
 /test_images
-# Compiled binaries
 check_sys
 check_timescale
 
@@ -8,3 +16,33 @@ check_timescale
 *.avif
 *.webp
 
+# Package/Bundle outputs
+*.deb
+*.app
+*.dmg
+*.AppImage
+*.tar.gz
+*.zip
+
+# Temporary files
+opencodetmp/
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# IDE/Editor
+.idea/
+.vscode/
+*.iml
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+Thumbs.db
+ehthumbs.db
+
+# Logs
+*.log
