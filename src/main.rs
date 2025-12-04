@@ -12,6 +12,173 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::thread;
 use uuid::Uuid;
 
+// --- AVIF Decoder Module ---
+
+mod avif_decoder {
+
+    /// Decoded AVIF frame with RGBA pixels
+    pub struct AvifFrame {
+        pub pixels: Vec<u8>,
+        pub width: u32,
+        pub height: u32,
+        pub duration: f64,
+    }
+
+    /// Result of decoding an AVIF file
+    pub struct AvifDecodeResult {
+        pub frames: Vec<AvifFrame>,
+        pub aspect_ratio: f32,
+    }
+
+    /// RAII wrapper for avifDecoder to ensure proper cleanup
+    struct DecoderGuard {
+        decoder: *mut libavif_sys::avifDecoder,
+    }
+
+    impl DecoderGuard {
+        fn new() -> Option<Self> {
+            let decoder = unsafe { libavif_sys::avifDecoderCreate() };
+            if decoder.is_null() {
+                None
+            } else {
+                Some(Self { decoder })
+            }
+        }
+
+        fn as_ptr(&self) -> *mut libavif_sys::avifDecoder {
+            self.decoder
+        }
+    }
+
+    impl Drop for DecoderGuard {
+        fn drop(&mut self) {
+            if !self.decoder.is_null() {
+                unsafe { libavif_sys::avifDecoderDestroy(self.decoder) };
+            }
+        }
+    }
+
+    /// RAII wrapper for avifRGBImage pixels to ensure proper cleanup
+    struct RgbImageGuard {
+        rgb: libavif_sys::avifRGBImage,
+        allocated: bool,
+    }
+
+    impl RgbImageGuard {
+        fn new() -> Self {
+            Self {
+                rgb: unsafe { std::mem::zeroed() },
+                allocated: false,
+            }
+        }
+
+        fn allocate(&mut self, image: *const libavif_sys::avifImage) {
+            unsafe {
+                libavif_sys::avifRGBImageSetDefaults(&mut self.rgb, image);
+                self.rgb.format = libavif_sys::AVIF_RGB_FORMAT_RGBA;
+                self.rgb.depth = 8;
+                libavif_sys::avifRGBImageAllocatePixels(&mut self.rgb);
+                self.allocated = true;
+            }
+        }
+
+        fn convert_from_yuv(&mut self, image: *const libavif_sys::avifImage) {
+            unsafe {
+                libavif_sys::avifImageYUVToRGB(image, &mut self.rgb);
+            }
+        }
+
+        fn extract_pixels(&self) -> Vec<u8> {
+            let width = self.rgb.width;
+            let height = self.rgb.height;
+            let row_bytes = self.rgb.rowBytes;
+
+            let mut packed_pixels = Vec::with_capacity((width * height * 4) as usize);
+            unsafe {
+                let pixel_slice =
+                    std::slice::from_raw_parts(self.rgb.pixels, (row_bytes * height) as usize);
+                for y in 0..height {
+                    let src_offset = (y * row_bytes) as usize;
+                    let src_row = &pixel_slice[src_offset..src_offset + (width * 4) as usize];
+                    packed_pixels.extend_from_slice(src_row);
+                }
+            }
+            packed_pixels
+        }
+    }
+
+    impl Drop for RgbImageGuard {
+        fn drop(&mut self) {
+            if self.allocated {
+                unsafe { libavif_sys::avifRGBImageFreePixels(&mut self.rgb) };
+            }
+        }
+    }
+
+    /// Decode an AVIF file from bytes, supporting both static and animated images.
+    ///
+    /// Returns `None` if decoding fails at any step.
+    pub fn decode_avif(data: &[u8]) -> Option<AvifDecodeResult> {
+        let decoder = DecoderGuard::new()?;
+
+        // Set up memory IO and parse the file
+        let result = unsafe {
+            libavif_sys::avifDecoderSetIOMemory(decoder.as_ptr(), data.as_ptr(), data.len())
+        };
+        if result != libavif_sys::AVIF_RESULT_OK {
+            return None;
+        }
+
+        let result = unsafe { libavif_sys::avifDecoderParse(decoder.as_ptr()) };
+        if result != libavif_sys::AVIF_RESULT_OK {
+            return None;
+        }
+
+        let mut frames = Vec::new();
+        let mut aspect_ratio = 1.0f32;
+
+        // Decode all frames
+        while unsafe { libavif_sys::avifDecoderNextImage(decoder.as_ptr()) }
+            == libavif_sys::AVIF_RESULT_OK
+        {
+            let image = unsafe { (*decoder.as_ptr()).image };
+            if image.is_null() {
+                continue;
+            }
+
+            let (width, height) = unsafe { ((*image).width, (*image).height) };
+
+            if frames.is_empty() && width > 0 && height > 0 {
+                aspect_ratio = width as f32 / height as f32;
+            }
+
+            // Convert YUV to RGBA
+            let mut rgb = RgbImageGuard::new();
+            rgb.allocate(image);
+            rgb.convert_from_yuv(image);
+
+            let pixels = rgb.extract_pixels();
+            let duration = unsafe { (*decoder.as_ptr()).imageTiming.duration };
+
+            frames.push(AvifFrame {
+                pixels,
+                width,
+                height,
+                duration,
+            });
+        }
+
+        if frames.is_empty() {
+            return None;
+        }
+
+        Some(AvifDecodeResult {
+            frames,
+            aspect_ratio,
+        })
+    }
+}
+
 const COLLISION_GAP: f32 = 2.0;
 const MIN_BLOCK_SIZE: f32 = 50.0;
 
@@ -909,61 +1076,15 @@ impl CanvasApp {
                     Ok(mut file) => {
                         let mut buffer = Vec::new();
                         if file.read_to_end(&mut buffer).is_ok() {
-                            unsafe {
-                                let decoder = libavif_sys::avifDecoderCreate();
-                                if !decoder.is_null() {
-                                    if libavif_sys::avifDecoderSetIOMemory(
-                                        decoder,
-                                        buffer.as_ptr(),
-                                        buffer.len(),
-                                    ) == libavif_sys::AVIF_RESULT_OK
-                                        && libavif_sys::avifDecoderParse(decoder)
-                                            == libavif_sys::AVIF_RESULT_OK
-                                        {
-                                            while libavif_sys::avifDecoderNextImage(decoder)
-                                                == libavif_sys::AVIF_RESULT_OK
-                                            {
-                                                let image = (*decoder).image;
-                                                let width = (*image).width;
-                                                let height = (*image).height;
-                                                let mut rgb: libavif_sys::avifRGBImage =
-                                                    std::mem::zeroed();
-                                                libavif_sys::avifRGBImageSetDefaults(
-                                                    &mut rgb, image,
-                                                );
-                                                rgb.format = libavif_sys::AVIF_RGB_FORMAT_RGBA;
-                                                rgb.depth = 8;
-                                                libavif_sys::avifRGBImageAllocatePixels(&mut rgb);
-                                                libavif_sys::avifImageYUVToRGB(image, &mut rgb);
-
-                                                let size = [width as usize, height as usize];
-                                                if frames_data.is_empty() {
-                                                    aspect = size[0] as f32 / size[1] as f32;
-                                                }
-
-                                                let mut packed_pixels =
-                                                    Vec::with_capacity(size[0] * size[1] * 4);
-                                                let pixel_slice = std::slice::from_raw_parts(
-                                                    rgb.pixels,
-                                                    (rgb.rowBytes * height) as usize,
-                                                );
-                                                for y in 0..height {
-                                                    let src_offset = (y * rgb.rowBytes) as usize;
-                                                    let src_row = &pixel_slice[src_offset
-                                                        ..src_offset + (width * 4) as usize];
-                                                    packed_pixels.extend_from_slice(src_row);
-                                                }
-                                                frames_data.push(
-                                                    egui::ColorImage::from_rgba_unmultiplied(
-                                                        size,
-                                                        &packed_pixels,
-                                                    ),
-                                                );
-                                                delays.push((*decoder).imageTiming.duration);
-                                                libavif_sys::avifRGBImageFreePixels(&mut rgb);
-                                            }
-                                        }
-                                    libavif_sys::avifDecoderDestroy(decoder);
+                            if let Some(result) = avif_decoder::decode_avif(&buffer) {
+                                aspect = result.aspect_ratio;
+                                for frame in result.frames {
+                                    let size = [frame.width as usize, frame.height as usize];
+                                    frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
+                                        size,
+                                        &frame.pixels,
+                                    ));
+                                    delays.push(frame.duration);
                                 }
                             }
                         }

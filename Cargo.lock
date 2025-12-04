@@ -2191,15 +2191,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
-name = "libavif"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0b710faf0de92da0e32a9a9c89bbf849e37277fd447b4f17b0f0f798796ae1f2"
-dependencies = [
- "libavif-sys",
-]
-
-[[package]]
 name = "libavif-sys"
 version = "0.17.0+libavif.1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2324,7 +2315,6 @@ dependencies = [
  "egui_commonmark",
  "gif",
  "image",
- "libavif",
  "libavif-sys",
  "rfd",
  "serde",
