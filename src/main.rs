@@ -12,9 +12,20 @@ use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use uuid::Uuid;
 
-// --- AVIF Decoder Module ---
+const COLLISION_GAP: f32 = 1.0;
+const MIN_BLOCK_SIZE: f32 = 50.0;
 
-mod avif_decoder {
+// --- Image Decoder Module ---
+
+mod image_decoder {
+
+    /// Image format enum
+    #[derive(Clone, Copy)]
+    pub enum ImageFormat {
+        Avif,
+        Gif,
+        Webp,
+    }
 
     /// Decoded AVIF frame with RGBA pixels
     pub struct AvifFrame {
@@ -27,7 +38,14 @@ mod avif_decoder {
     /// Result of decoding an AVIF file
     pub struct AvifDecodeResult {
         pub frames: Vec<AvifFrame>,
+    }
+
+    /// Result of decoding just the first frame (for preview)
+    pub struct AvifFirstFrameResult {
+        pub frame: AvifFrame,
         pub aspect_ratio: f32,
+        pub total_frame_count: usize,
+        pub frame_durations: Vec<f64>,
     }
 
     /// RAII wrapper for avifDecoder to ensure proper cleanup
@@ -39,7 +57,7 @@ mod avif_decoder {
         fn new() -> Option<Self> {
             let decoder = unsafe { libavif_sys::avifDecoderCreate() };
             if decoder.is_null() {
-                None
+                return None;
             } else {
                 // Enable multi-threaded decoding using all available CPU cores
                 unsafe {
@@ -48,20 +66,14 @@ mod avif_decoder {
                         .unwrap_or(4);
                     (*decoder).maxThreads = num_cpus;
                 }
-                Some(Self { decoder })
+                return Some(Self { decoder });
             }
-        }
-
-        fn as_ptr(&self) -> *mut libavif_sys::avifDecoder {
-            self.decoder
         }
     }
 
     impl Drop for DecoderGuard {
         fn drop(&mut self) {
-            if !self.decoder.is_null() {
-                unsafe { libavif_sys::avifDecoderDestroy(self.decoder) };
-            }
+            unsafe { libavif_sys::avifDecoderDestroy(self.decoder) };
         }
     }
 
@@ -122,6 +134,48 @@ mod avif_decoder {
         }
     }
 
+    /// Decoded GIF frame with RGBA pixels
+    pub struct GifFrame {
+        pub pixels: Vec<u8>,
+        pub width: u32,
+        pub height: u32,
+        pub duration: f64,
+    }
+
+    /// Result of decoding a GIF file
+    pub struct GifDecodeResult {
+        pub frames: Vec<GifFrame>,
+    }
+
+    /// Result of decoding just the first frame of GIF (for preview)
+    pub struct GifFirstFrameResult {
+        pub frame: GifFrame,
+        pub aspect_ratio: f32,
+        pub total_frame_count: usize,
+        pub frame_durations: Vec<f64>,
+    }
+
+    /// Decoded WebP frame with RGBA pixels
+    pub struct WebpFrame {
+        pub pixels: Vec<u8>,
+        pub width: u32,
+        pub height: u32,
+        pub duration: f64,
+    }
+
+    /// Result of decoding a WebP file
+    pub struct WebpDecodeResult {
+        pub frames: Vec<WebpFrame>,
+    }
+
+    /// Result of decoding just the first frame of WebP (for preview)
+    pub struct WebpFirstFrameResult {
+        pub frame: WebpFrame,
+        pub aspect_ratio: f32,
+        pub total_frame_count: usize,
+        pub frame_durations: Vec<f64>,
+    }
+
     /// Decode an AVIF file from bytes, supporting both static and animated images.
     ///
     /// Returns `None` if decoding fails at any step.
@@ -130,23 +184,22 @@ mod avif_decoder {
 
         // Set up memory IO and parse the file
         let result = unsafe {
-            libavif_sys::avifDecoderSetIOMemory(decoder.as_ptr(), data.as_ptr(), data.len())
+            libavif_sys::avifDecoderSetIOMemory(decoder.decoder, data.as_ptr(), data.len())
         };
         if result != libavif_sys::AVIF_RESULT_OK {
             return None;
         }
 
-        let result = unsafe { libavif_sys::avifDecoderParse(decoder.as_ptr()) };
+        let result = unsafe { libavif_sys::avifDecoderParse(decoder.decoder) };
         if result != libavif_sys::AVIF_RESULT_OK {
             return None;
         }
 
         let mut frames = Vec::new();
-        let mut aspect_ratio = 1.0f32;
 
         // Get the total animation duration and frame count for fallback calculation
-        let image_count = unsafe { (*decoder.as_ptr()).imageCount } as usize;
-        let total_duration = unsafe { (*decoder.as_ptr()).duration };
+        let image_count = unsafe { (*decoder.decoder).imageCount } as usize;
+        let total_duration = unsafe { (*decoder.decoder).duration };
 
         // Calculate fallback duration per frame if individual frame timing is invalid
         let fallback_duration = if image_count > 1 && total_duration > 0.0 {
@@ -158,19 +211,15 @@ mod avif_decoder {
         let mut frame_index: u32 = 0;
 
         // Decode all frames
-        while unsafe { libavif_sys::avifDecoderNextImage(decoder.as_ptr()) }
+        while unsafe { libavif_sys::avifDecoderNextImage(decoder.decoder) }
             == libavif_sys::AVIF_RESULT_OK
         {
-            let image = unsafe { (*decoder.as_ptr()).image };
+            let image = unsafe { (*decoder.decoder).image };
             if image.is_null() {
                 continue;
             }
 
             let (width, height) = unsafe { ((*image).width, (*image).height) };
-
-            if frames.is_empty() && width > 0 && height > 0 {
-                aspect_ratio = width as f32 / height as f32;
-            }
 
             // Convert YUV to RGBA
             let mut rgb = RgbImageGuard::new();
@@ -183,7 +232,7 @@ mod avif_decoder {
             let duration = unsafe {
                 let mut timing: libavif_sys::avifImageTiming = std::mem::zeroed();
                 let timing_result = libavif_sys::avifDecoderNthImageTiming(
-                    decoder.as_ptr(),
+                    decoder.decoder,
                     frame_index,
                     &mut timing,
                 );
@@ -192,7 +241,7 @@ mod avif_decoder {
                     timing.duration
                 } else {
                     // Fallback: use decoder's imageTiming.duration
-                    let img_timing_duration = (*decoder.as_ptr()).imageTiming.duration;
+                    let img_timing_duration = (*decoder.decoder).imageTiming.duration;
                     if img_timing_duration > 0.0 {
                         img_timing_duration
                     } else if image_count > 1 {
@@ -219,39 +268,246 @@ mod avif_decoder {
             return None;
         }
 
-        Some(AvifDecodeResult {
-            frames,
+        Some(AvifDecodeResult { frames })
+    }
+
+    /// Decode only the first frame of an AVIF file (fast preview)
+    /// Also extracts metadata about frame count and durations
+    pub fn decode_avif_first_frame(data: &[u8]) -> Option<AvifFirstFrameResult> {
+        let decoder = DecoderGuard::new()?;
+
+        let result = unsafe {
+            libavif_sys::avifDecoderSetIOMemory(decoder.decoder, data.as_ptr(), data.len())
+        };
+        if result != libavif_sys::AVIF_RESULT_OK {
+            return None;
+        }
+
+        let result = unsafe { libavif_sys::avifDecoderParse(decoder.decoder) };
+        if result != libavif_sys::AVIF_RESULT_OK {
+            return None;
+        }
+
+        let image_count = unsafe { (*decoder.decoder).imageCount } as usize;
+        let total_duration = unsafe { (*decoder.decoder).duration };
+
+        let fallback_duration = if image_count > 1 && total_duration > 0.0 {
+            total_duration / image_count as f64
+        } else {
+            0.1
+        };
+
+        // Extract all frame durations (metadata only, no pixel decoding)
+        let mut frame_durations = Vec::with_capacity(image_count);
+        for i in 0..image_count {
+            let duration = unsafe {
+                let mut timing: libavif_sys::avifImageTiming = std::mem::zeroed();
+                let timing_result =
+                    libavif_sys::avifDecoderNthImageTiming(decoder.decoder, i as u32, &mut timing);
+
+                if timing_result == libavif_sys::AVIF_RESULT_OK && timing.duration > 0.0 {
+                    timing.duration
+                } else if image_count > 1 {
+                    fallback_duration
+                } else {
+                    0.0
+                }
+            };
+            frame_durations.push(duration);
+        }
+
+        // Decode only the first frame
+        let result = unsafe { libavif_sys::avifDecoderNextImage(decoder.decoder) };
+        if result != libavif_sys::AVIF_RESULT_OK {
+            return None;
+        }
+
+        let image = unsafe { (*decoder.decoder).image };
+        if image.is_null() {
+            return None;
+        }
+
+        let (width, height) = unsafe { ((*image).width, (*image).height) };
+        let aspect_ratio = if width > 0 && height > 0 {
+            width as f32 / height as f32
+        } else {
+            1.0
+        };
+
+        let mut rgb = RgbImageGuard::new();
+        rgb.allocate(image);
+        rgb.convert_from_yuv(image);
+
+        let pixels = rgb.extract_pixels();
+
+        Some(AvifFirstFrameResult {
+            frame: AvifFrame {
+                pixels,
+                width,
+                height,
+                duration: frame_durations.first().copied().unwrap_or(0.1),
+            },
             aspect_ratio,
+            total_frame_count: image_count,
+            frame_durations,
+        })
+    }
+
+    /// Decode a GIF file from bytes, supporting both static and animated images.
+    pub fn decode_gif(data: &[u8]) -> Option<GifDecodeResult> {
+        let mut decoder = gif::DecodeOptions::new();
+        decoder.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = decoder.read_info(std::io::Cursor::new(data)).ok()?;
+
+        let mut frames = Vec::new();
+
+        while let Some(frame) = decoder.read_next_frame().ok().flatten() {
+            let pixels = frame.buffer.to_vec();
+            frames.push(GifFrame {
+                pixels,
+                width: frame.width as u32,
+                height: frame.height as u32,
+                duration: frame.delay as f64 / 100.0,
+            });
+        }
+
+        if frames.is_empty() {
+            None
+        } else {
+            Some(GifDecodeResult { frames })
+        }
+    }
+
+    /// Decode only the first frame of a GIF file (fast preview)
+    pub fn decode_gif_first_frame(data: &[u8]) -> Option<GifFirstFrameResult> {
+        let mut decoder = gif::DecodeOptions::new();
+        decoder.set_color_output(gif::ColorOutput::RGBA);
+        let mut decoder = decoder.read_info(std::io::Cursor::new(data)).ok()?;
+
+        let width = decoder.width() as u32;
+        let height = decoder.height() as u32;
+        let aspect_ratio = if height > 0 { width as f32 / height as f32 } else { 1.0 };
+
+        let mut frame_durations = Vec::new();
+        let mut first_frame_pixels = None;
+
+        while let Some(frame) = decoder.read_next_frame().ok().flatten() {
+            frame_durations.push(frame.delay as f64 / 100.0);
+            if first_frame_pixels.is_none() {
+                first_frame_pixels = Some(frame.buffer.to_vec());
+            }
+        }
+
+        let total_frame_count = frame_durations.len();
+
+        if let Some(pixels) = first_frame_pixels {
+            Some(GifFirstFrameResult {
+                frame: GifFrame {
+                    pixels,
+                    width,
+                    height,
+                    duration: frame_durations.first().copied().unwrap_or(0.1),
+                },
+                aspect_ratio,
+                total_frame_count,
+                frame_durations,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Decode a WebP file from bytes, supporting both static and animated images.
+    pub fn decode_webp(data: &[u8]) -> Option<WebpDecodeResult> {
+        let decoder = webp::AnimDecoder::new(data);
+        let anim = decoder.decode().ok()?;
+
+        let mut frames = Vec::new();
+        let mut prev_timestamp = 0;
+        for frame in &anim {
+            let timestamp = frame.get_time_ms();
+            let delay_ms = timestamp.saturating_sub(prev_timestamp);
+            let duration = if delay_ms > 0 {
+                delay_ms as f64 / 1000.0
+            } else if anim.has_animation() {
+                0.1
+            } else {
+                0.0
+            };
+            prev_timestamp = timestamp;
+
+            let img: image::DynamicImage = (&frame).into();
+            let buffer = img.to_rgba8();
+            let pixels = buffer.as_raw().to_vec();
+            frames.push(WebpFrame {
+                pixels,
+                width: buffer.width(),
+                height: buffer.height(),
+                duration,
+            });
+        }
+
+        if frames.is_empty() {
+            None
+        } else {
+            Some(WebpDecodeResult { frames })
+        }
+    }
+
+    /// Decode only the first frame of a WebP file (fast preview)
+    pub fn decode_webp_first_frame(data: &[u8]) -> Option<WebpFirstFrameResult> {
+        let decoder = webp::AnimDecoder::new(data);
+        let anim = decoder.decode().ok()?;
+
+        if anim.len() == 0 {
+            return None;
+        }
+
+        let first_frame = anim.get_frame(0)?;
+        let width = first_frame.width();
+        let height = first_frame.height();
+        let aspect_ratio = if height > 0 { width as f32 / height as f32 } else { 1.0 };
+
+        let mut frame_durations = Vec::new();
+        let mut prev_timestamp = 0;
+        for frame in &anim {
+            let timestamp = frame.get_time_ms();
+            let delay_ms = timestamp.saturating_sub(prev_timestamp);
+            let delay = if delay_ms > 0 {
+                delay_ms as f64 / 1000.0
+            } else if anim.has_animation() {
+                0.1
+            } else {
+                0.0
+            };
+            prev_timestamp = timestamp;
+            frame_durations.push(delay);
+        }
+
+        let img: image::DynamicImage = (&first_frame).into();
+        let buffer = img.to_rgba8();
+        let pixels = buffer.as_raw().to_vec();
+
+        Some(WebpFirstFrameResult {
+            frame: WebpFrame {
+                pixels,
+                width: width as u32,
+                height: height as u32,
+                duration: frame_durations.first().copied().unwrap_or(0.1),
+            },
+            aspect_ratio,
+            total_frame_count: anim.len(),
+            frame_durations,
         })
     }
 }
 
-const COLLISION_GAP: f32 = 2.0;
-const MIN_BLOCK_SIZE: f32 = 50.0;
-
-fn main() -> Result<(), eframe::Error> {
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1200.0, 800.0])
-            .with_min_inner_size([400.0, 300.0])
-            .with_title("MaBlocks - Rust Canvas"),
-        ..Default::default()
-    };
-    eframe::run_native(
-        "MaBlocks",
-        options,
-        Box::new(|_cc| Ok(Box::new(CanvasApp::default()))),
-    )
-}
-
-// --- Data Structures ---
-
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 enum ResizeHandle {
-    BottomRight,
-    BottomLeft,
-    TopRight,
     TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 #[derive(Clone)]
@@ -260,6 +516,22 @@ struct InteractionState {
     handle: ResizeHandle,
     initial_mouse_pos: Pos2,
     initial_block_rect: Rect,
+}
+
+/// Animation loading state for lazy-loaded animated images
+#[derive(Clone)]
+enum AnimationState {
+    /// Not animated (static image) or fully loaded animation
+    Ready,
+    /// Animation not yet loaded - shows first frame, waiting for user to click play
+    NotLoaded {
+        path: String,
+        format: image_decoder::ImageFormat,
+        total_frame_count: usize,
+        frame_durations: Vec<f64>,
+    },
+    /// Currently loading animation frames in background
+    Loading { total_frame_count: usize },
 }
 
 #[derive(Clone)]
@@ -276,6 +548,8 @@ enum BlockContent {
         last_frame_time: f64,
         counter: i32,
         path: Option<String>,
+        /// Animation loading state (for lazy-loaded AVIF animations)
+        animation_state: AnimationState,
     },
 }
 
@@ -323,14 +597,50 @@ struct CanvasApp {
     common_mark_cache: CommonMarkCache,
 }
 
+/// Data sent from background image loading thread
 #[derive(Clone)]
-struct ImageLoadData {
-    frames: Vec<egui::ColorImage>,
-    frame_delays: Vec<f64>,
-    aspect_ratio: f32,
-    path: Option<String>,
-    // If this load is for an existing block (session load), we pass the ID
-    target_block_id: Option<Uuid>,
+enum ImageLoadData {
+    /// Full image loaded (all frames ready)
+    Complete {
+        frames: Vec<egui::ColorImage>,
+        frame_delays: Vec<f64>,
+        aspect_ratio: f32,
+        path: Option<String>,
+        target_block_id: Option<Uuid>,
+    },
+    /// AVIF preview - only first frame loaded, animation available on demand
+    AvifPreview {
+        first_frame: egui::ColorImage,
+        frame_durations: Vec<f64>,
+        aspect_ratio: f32,
+        total_frame_count: usize,
+        path: Option<String>,
+        target_block_id: Option<Uuid>,
+    },
+    /// GIF preview - only first frame loaded, animation available on demand
+    GifPreview {
+        first_frame: egui::ColorImage,
+        frame_durations: Vec<f64>,
+        aspect_ratio: f32,
+        total_frame_count: usize,
+        path: Option<String>,
+        target_block_id: Option<Uuid>,
+    },
+    /// WebP preview - only first frame loaded, animation available on demand
+    WebpPreview {
+        first_frame: egui::ColorImage,
+        frame_durations: Vec<f64>,
+        aspect_ratio: f32,
+        total_frame_count: usize,
+        path: Option<String>,
+        target_block_id: Option<Uuid>,
+    },
+    /// Remaining animation frames loaded (after user clicked play)
+    AnimationLoaded {
+        target_block_id: Uuid,
+        frames: Vec<egui::ColorImage>,
+        frame_delays: Vec<f64>,
+    },
 }
 
 // --- Serialization Structs ---
@@ -430,12 +740,13 @@ impl Block {
         moved
     }
 }
-
 // --- App Implementation ---
 
 impl eframe::App for CanvasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut help_toggled = false;
+
+        let time_now = ctx.input(|i| i.time);
 
         // Poll for file dialog results
         match self.file_dialog_rx.try_recv() {
@@ -455,72 +766,322 @@ impl eframe::App for CanvasApp {
 
         // Poll for loaded image data
         while let Ok(data) = self.image_rx.try_recv() {
-            if data.frames.is_empty() {
-                continue;
-            }
+            match data {
+                ImageLoadData::Complete {
+                    frames,
+                    frame_delays,
+                    aspect_ratio,
+                    path,
+                    target_block_id,
+                } => {
+                    if frames.is_empty() {
+                        continue;
+                    }
 
-            let texture_frames: Vec<_> = data
-                .frames
-                .iter()
-                .enumerate()
-                .map(|(i, img)| {
-                    ctx.load_texture(
-                        format!("img-{}-{}", Uuid::new_v4(), i),
-                        img.clone(),
-                        egui::TextureOptions::default(),
-                    )
-                })
-                .collect();
+                    let texture_frames: Vec<_> = frames
+                        .iter()
+                        .enumerate()
+                        .map(|(i, img)| {
+                            ctx.load_texture(
+                                format!("img-{}-{i}", Uuid::new_v4()),
+                                img.clone(),
+                                egui::TextureOptions::default(),
+                            )
+                        })
+                        .collect();
 
-            if let Some(target_id) = data.target_block_id {
-                // Update existing block (from session load)
-                if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_id) {
-                    if let BlockContent::Image {
-                        frames,
-                        frame_delays,
-                        aspect_ratio,
-                        ..
-                    } = &mut block.content
-                    {
-                        *frames = texture_frames;
-                        *frame_delays = data.frame_delays;
-                        *aspect_ratio = data.aspect_ratio;
+                    if let Some(target_id) = target_block_id {
+                        if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_id) {
+                            if let BlockContent::Image {
+                                frames: f,
+                                frame_delays: fd,
+                                aspect_ratio: ar,
+                                animation_state,
+                                ..
+                            } = &mut block.content
+                            {
+                                *f = texture_frames;
+                                *fd = frame_delays;
+                                *ar = aspect_ratio;
+                                *animation_state = AnimationState::Ready;
+                            }
+                        }
+                    } else {
+                        let id = Uuid::new_v4();
+                        let width = 300.0;
+                        let height = width / aspect_ratio;
+                        let size = Vec2::new(width, height);
+                        let center_world = -self.viewport.pan;
+                        let pos = self.find_free_rect(center_world, size);
+
+                        self.blocks.push(Block {
+                            id,
+                            rect: Rect::from_min_size(pos.to_pos2(), size),
+                            content: BlockContent::Image {
+                                frames: texture_frames,
+                                frame_delays,
+                                aspect_ratio,
+                                playing: frames.len() > 1,
+                                current_frame_idx: 0,
+                                last_frame_time: 0.0,
+                                counter: 0,
+                                path,
+                                animation_state: AnimationState::Ready,
+                            },
+                            chained: false,
+                            selected: false,
+                        });
                     }
                 }
-            } else {
-                // Create new block
-                let id = Uuid::new_v4();
-                let width = 300.0;
-                let height = width / data.aspect_ratio;
-                let size = Vec2::new(width, height);
-                let center_world = -self.viewport.pan;
-                let pos = self.find_free_rect(center_world, size);
+                ImageLoadData::AvifPreview {
+                    first_frame,
+                    frame_durations,
+                    aspect_ratio,
+                    total_frame_count,
+                    path,
+                    target_block_id,
+                } => {
+                    let texture = ctx.load_texture(
+                        format!("avif-preview-{}", Uuid::new_v4()),
+                        first_frame,
+                        egui::TextureOptions::default(),
+                    );
 
-                self.blocks.push(Block {
-                    id,
-                    rect: Rect::from_min_size(pos.to_pos2(), size),
-                    content: BlockContent::Image {
-                        frames: texture_frames,
-                        frame_delays: data.frame_delays,
-                        aspect_ratio: data.aspect_ratio,
-                        playing: data.frames.len() > 1,
-                        current_frame_idx: 0,
-                        last_frame_time: 0.0,
-                        counter: 0,
-                        path: data.path,
-                    },
-                    chained: false,
-                    selected: false,
-                });
+                    let animation_state = if total_frame_count > 1 {
+                        AnimationState::NotLoaded {
+                            path: path.clone().unwrap(),
+                            format: image_decoder::ImageFormat::Avif,
+                            total_frame_count,
+                            frame_durations: frame_durations.clone(),
+                        }
+                    } else {
+                        AnimationState::Ready
+                    };
+
+                    if let Some(target_id) = target_block_id {
+                        if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_id) {
+                            if let BlockContent::Image {
+                                frames,
+                                frame_delays,
+                                aspect_ratio: ar,
+                                animation_state: anim_state,
+                                ..
+                            } = &mut block.content
+                            {
+                                *frames = vec![texture];
+                                *frame_delays = frame_durations;
+                                *ar = aspect_ratio;
+                                *anim_state = animation_state;
+                            }
+                        }
+                    } else {
+                        let id = Uuid::new_v4();
+                        let width = 300.0;
+                        let height = width / aspect_ratio;
+                        let size = Vec2::new(width, height);
+                        let center_world = -self.viewport.pan;
+                        let pos = self.find_free_rect(center_world, size);
+
+                        self.blocks.push(Block {
+                            id,
+                            rect: Rect::from_min_size(pos.to_pos2(), size),
+                            content: BlockContent::Image {
+                                frames: vec![texture],
+                                frame_delays: frame_durations,
+                                aspect_ratio,
+                                playing: false, // Don't auto-play, wait for user click
+                                current_frame_idx: 0,
+                                last_frame_time: 0.0,
+                                counter: 0,
+                                path,
+                                animation_state,
+                            },
+                            chained: false,
+                            selected: false,
+                         });
+                     }
+                 }
+                ImageLoadData::GifPreview {
+                    first_frame,
+                    frame_durations,
+                    aspect_ratio,
+                    total_frame_count,
+                    path,
+                    target_block_id,
+                } => {
+                     let texture = ctx.load_texture(
+                         format!("gif-preview-{}", Uuid::new_v4()),
+                         first_frame,
+                         egui::TextureOptions::default(),
+                     );
+
+                     let animation_state = if total_frame_count > 1 {
+                         AnimationState::NotLoaded {
+                             path: path.clone().unwrap(),
+                             format: image_decoder::ImageFormat::Gif,
+                             total_frame_count,
+                             frame_durations: frame_durations.clone(),
+                         }
+                     } else {
+                         AnimationState::Ready
+                     };
+
+                     if let Some(target_id) = target_block_id {
+                         if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_id) {
+                             if let BlockContent::Image {
+                                 frames,
+                                 frame_delays,
+                                 aspect_ratio: ar,
+                                 animation_state: anim_state,
+                                 ..
+                             } = &mut block.content
+                             {
+                                 *frames = vec![texture];
+                                 *frame_delays = frame_durations;
+                                 *ar = aspect_ratio;
+                                 *anim_state = animation_state;
+                             }
+                         }
+                     } else {
+                         let id = Uuid::new_v4();
+                         let width = 300.0;
+                         let height = width / aspect_ratio;
+                         let size = Vec2::new(width, height);
+                         let center_world = -self.viewport.pan;
+                         let pos = self.find_free_rect(center_world, size);
+
+                         self.blocks.push(Block {
+                             id,
+                             rect: Rect::from_min_size(pos.to_pos2(), size),
+                             content: BlockContent::Image {
+                                 frames: vec![texture],
+                                 frame_delays: frame_durations,
+                                 aspect_ratio,
+                                 playing: false,
+                                 current_frame_idx: 0,
+                                 last_frame_time: 0.0,
+                                 counter: 0,
+                                 path,
+                                 animation_state,
+                             },
+                             chained: false,
+                             selected: false,
+                         });
+                     }
+                 }
+                ImageLoadData::WebpPreview {
+                    first_frame,
+                    frame_durations,
+                    aspect_ratio,
+                    total_frame_count,
+                    path,
+                    target_block_id,
+                } => {
+                     let texture = ctx.load_texture(
+                         format!("webp-preview-{}", Uuid::new_v4()),
+                         first_frame,
+                         egui::TextureOptions::default(),
+                     );
+
+                     let animation_state = if total_frame_count > 1 {
+                         AnimationState::NotLoaded {
+                             path: path.clone().unwrap(),
+                             format: image_decoder::ImageFormat::Webp,
+                             total_frame_count,
+                             frame_durations: frame_durations.clone(),
+                         }
+                     } else {
+                         AnimationState::Ready
+                     };
+
+                     if let Some(target_id) = target_block_id {
+                         if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_id) {
+                             if let BlockContent::Image {
+                                 frames,
+                                 frame_delays,
+                                 aspect_ratio: ar,
+                                 animation_state: anim_state,
+                                 ..
+                             } = &mut block.content
+                             {
+                                 *frames = vec![texture];
+                                 *frame_delays = frame_durations;
+                                 *ar = aspect_ratio;
+                                 *anim_state = animation_state;
+                             }
+                         }
+                     } else {
+                         let id = Uuid::new_v4();
+                         let width = 300.0;
+                         let height = width / aspect_ratio;
+                         let size = Vec2::new(width, height);
+                         let center_world = -self.viewport.pan;
+                         let pos = self.find_free_rect(center_world, size);
+
+                         self.blocks.push(Block {
+                             id,
+                             rect: Rect::from_min_size(pos.to_pos2(), size),
+                             content: BlockContent::Image {
+                                 frames: vec![texture],
+                                 frame_delays: frame_durations,
+                                 aspect_ratio,
+                                 playing: false,
+                                 current_frame_idx: 0,
+                                 last_frame_time: 0.0,
+                                 counter: 0,
+                                 path,
+                                 animation_state,
+                             },
+                             chained: false,
+                             selected: false,
+                         });
+                     }
+                 }
+                 ImageLoadData::AnimationLoaded {
+                    target_block_id,
+                    frames,
+                    frame_delays,
+                } => {
+                    if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_block_id) {
+                        if let BlockContent::Image {
+                            frames: existing_frames,
+                            frame_delays: existing_delays,
+                            animation_state,
+                            playing,
+                            last_frame_time,
+                            ..
+                        } = &mut block.content
+                        {
+                            // Convert all frames to textures
+                            let texture_frames: Vec<_> = frames
+                                .iter()
+                                .enumerate()
+                                .map(|(i, img)| {
+                                    ctx.load_texture(
+                                        format!("avif-anim-{target_block_id}-{i}"),
+                                        img.clone(),
+                                        egui::TextureOptions::default(),
+                                    )
+                                })
+                                .collect();
+
+                            *existing_frames = texture_frames;
+                            *existing_delays = frame_delays;
+                            *animation_state = AnimationState::Ready;
+                            *playing = true;
+                            *last_frame_time = time_now;
+                        }
+                    }
+                }
             }
         }
 
         if !self.blocks.is_empty() {
             ctx.request_repaint();
         }
-        let time_now = ctx.input(|i| i.time);
 
-        // 1. Update Animation State
+        // 1. Update Animation State (restored sophisticated timing)
+        let time_now = ctx.input(|i| i.time);
         for block in &mut self.blocks {
             if let BlockContent::Image {
                 frames,
@@ -544,9 +1105,7 @@ impl eframe::App for CanvasApp {
                         }
                     }
                     // Update last_frame_time, accounting for partial frame time remaining
-                    if time_now - *last_frame_time > frame_delays.get(*current_frame_idx).copied().unwrap_or(0.1) {
-                        *last_frame_time = time_now - elapsed;
-                    }
+                    *last_frame_time = time_now - elapsed;
                 }
             }
         }
@@ -833,6 +1392,7 @@ impl CanvasApp {
         let mut ids_to_delete = HashSet::new();
         let mut interact_captured = false;
         let mut pending_move = None;
+        let mut animation_load_requests = Vec::new(); // Collect animation load requests
 
         for i in 0..self.blocks.len() {
             let b_id = self.blocks[i].id;
@@ -943,6 +1503,7 @@ impl CanvasApp {
                         current_frame_idx,
                         playing,
                         counter,
+                        animation_state,
                         ..
                     } => {
                         if let Some(tex) = frames.get(*current_frame_idx) {
@@ -953,6 +1514,20 @@ impl CanvasApp {
                                 Color32::WHITE,
                             );
                         }
+
+                        // Show loading indicator for animation frames
+                        if let AnimationState::Loading { total_frame_count } = animation_state {
+                            let loading_text =
+                                format!("Loading {}/{}", frames.len(), total_frame_count);
+                            ui.painter().text(
+                                screen_rect.center(),
+                                Align2::CENTER_CENTER,
+                                loading_text,
+                                egui::FontId::proportional(16.0 * zoom),
+                                Color32::WHITE,
+                            );
+                        }
+
                         if *counter > 0 {
                             let circle_radius = 15.0 * zoom;
                             let circle_center = screen_rect.min
@@ -970,6 +1545,7 @@ impl CanvasApp {
                                 Color32::BLACK,
                             );
                         }
+
                         if self.counter_tool_active {
                             if response.clicked() {
                                 *counter += 1;
@@ -977,7 +1553,14 @@ impl CanvasApp {
                                 *counter = (*counter - 1).max(0);
                             }
                         } else if response.clicked() && !close_hovered && !chain_hovered {
-                            *playing = !*playing;
+                            // Handle animation state transitions
+                            if let AnimationState::NotLoaded { .. } = animation_state {
+                                // Collect request to start loading animation frames
+                                animation_load_requests.push((b_id,));
+                            } else {
+                                // Toggle playing for loaded animations
+                                *playing = !*playing;
+                            }
                         }
                     }
                 }
@@ -1061,7 +1644,88 @@ impl CanvasApp {
                         }
                     }
                 }
-                self.last_dragged_id = None;
+            }
+        }
+        // Process animation load requests
+        for (block_id,) in animation_load_requests {
+            if let Some(block) = self.blocks.iter_mut().find(|b| b.id == block_id) {
+                if let BlockContent::Image {
+                    animation_state, ..
+                } = &mut block.content
+                {
+                    let not_loaded = std::mem::replace(animation_state, AnimationState::Ready);
+                    if let AnimationState::NotLoaded {
+                        path,
+                        format,
+                        total_frame_count,
+                        frame_durations,
+                    } = not_loaded
+                    {
+                        let path = path;
+                        let frame_durations = frame_durations;
+                        let tx = self.image_tx.clone();
+
+                        // Update state to loading
+                        *animation_state = AnimationState::Loading {
+                            total_frame_count,
+                        };
+
+                        thread::spawn(move || {
+                            // Read the file again to decode
+                            let frames = if let Ok(mut file) = std::fs::File::open(&path) {
+                                let mut buffer = Vec::new();
+                                if file.read_to_end(&mut buffer).is_ok() {
+                                    match format {
+                                        image_decoder::ImageFormat::Avif => {
+                                            if let Some(result) = image_decoder::decode_avif(&buffer) {
+                                                result.frames.into_iter().map(|frame| {
+                                                    let size = [frame.width as usize, frame.height as usize];
+                                                    egui::ColorImage::from_rgba_unmultiplied(size, &frame.pixels)
+                                                }).collect()
+                                            } else {
+                                                Vec::new()
+                                            }
+                                        }
+                                        image_decoder::ImageFormat::Gif => {
+                                            if let Some(result) = image_decoder::decode_gif(&buffer) {
+                                                result.frames.into_iter().map(|frame| {
+                                                    let size = [frame.width as usize, frame.height as usize];
+                                                    egui::ColorImage::from_rgba_unmultiplied(size, &frame.pixels)
+                                                }).collect()
+                                            } else {
+                                                Vec::new()
+                                            }
+                                        }
+                                        image_decoder::ImageFormat::Webp => {
+                                            if let Some(result) = image_decoder::decode_webp(&buffer) {
+                                                result.frames.into_iter().map(|frame| {
+                                                    let size = [frame.width as usize, frame.height as usize];
+                                                    egui::ColorImage::from_rgba_unmultiplied(size, &frame.pixels)
+                                                }).collect()
+                                            } else {
+                                                Vec::new()
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    Vec::new()
+                                }
+                            } else {
+                                Vec::new()
+                            };
+
+                            if !frames.is_empty() {
+                                let _ = tx.send(ImageLoadData::AnimationLoaded {
+                                    target_block_id: block_id,
+                                    frames,
+                                    frame_delays: frame_durations,
+                                });
+                            }
+                        });
+                    } else {
+                        *animation_state = not_loaded;
+                    }
+                }
             }
         }
 
@@ -1136,20 +1800,35 @@ impl CanvasApp {
 
             if is_gif {
                 match File::open(&path) {
-                    Ok(file) => {
-                        let mut decoder = gif::DecodeOptions::new();
-                        decoder.set_color_output(gif::ColorOutput::RGBA);
-                        if let Ok(mut decoder) = decoder.read_info(BufReader::new(file)) {
-                            while let Some(frame) = decoder.read_next_frame().ok().flatten() {
-                                let size = [frame.width as usize, frame.height as usize];
-                                if frames_data.is_empty() {
-                                    aspect = size[0] as f32 / size[1] as f32;
+                    Ok(mut file) => {
+                        let mut buffer = Vec::new();
+                        if file.read_to_end(&mut buffer).is_ok() {
+                            if let Some(preview) = image_decoder::decode_gif_first_frame(&buffer) {
+                                if preview.total_frame_count > 1 {
+                                    // Animated GIF - send preview only
+                                    let first_frame = egui::ColorImage::from_rgba_unmultiplied(
+                                        [preview.frame.width as usize, preview.frame.height as usize],
+                                        &preview.frame.pixels,
+                                    );
+                                    let _ = tx.send(ImageLoadData::GifPreview {
+                                        first_frame,
+                                        frame_durations: preview.frame_durations,
+                                        aspect_ratio: preview.aspect_ratio,
+                                        total_frame_count: preview.total_frame_count,
+                                        path: Some(path_str),
+                                        target_block_id,
+                                    });
+                                    return;
+                                } else {
+                                    // Static GIF - just one frame
+                                    let size = [preview.frame.width as usize, preview.frame.height as usize];
+                                    frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
+                                        size,
+                                        &preview.frame.pixels,
+                                    ));
+                                    delays.push(preview.frame.duration);
+                                    aspect = preview.aspect_ratio;
                                 }
-                                frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
-                                    size,
-                                    &frame.buffer[..],
-                                ));
-                                delays.push(frame.delay as f64 / 100.0);
                             }
                         }
                     }
@@ -1160,15 +1839,39 @@ impl CanvasApp {
                     Ok(mut file) => {
                         let mut buffer = Vec::new();
                         if file.read_to_end(&mut buffer).is_ok() {
-                            if let Some(result) = avif_decoder::decode_avif(&buffer) {
-                                aspect = result.aspect_ratio;
-                                for frame in result.frames {
-                                    let size = [frame.width as usize, frame.height as usize];
+                            // For animated AVIFs (>1 frame), use lazy loading
+                            // Load only first frame immediately, rest on demand
+                            if let Some(preview) = image_decoder::decode_avif_first_frame(&buffer) {
+                                if preview.total_frame_count > 1 {
+                                    // Animated AVIF - send preview only
+                                    let first_frame = egui::ColorImage::from_rgba_unmultiplied(
+                                        [
+                                            preview.frame.width as usize,
+                                            preview.frame.height as usize,
+                                        ],
+                                        &preview.frame.pixels,
+                                    );
+                                     let _ = tx.send(ImageLoadData::AvifPreview {
+                                         first_frame,
+                                         frame_durations: preview.frame_durations,
+                                         aspect_ratio: preview.aspect_ratio,
+                                         total_frame_count: preview.total_frame_count,
+                                         path: Some(path_str),
+                                         target_block_id,
+                                     });
+                                    return;
+                                } else {
+                                    // Static AVIF - just one frame
+                                    let size = [
+                                        preview.frame.width as usize,
+                                        preview.frame.height as usize,
+                                    ];
                                     frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
                                         size,
-                                        &frame.pixels,
+                                        &preview.frame.pixels,
                                     ));
-                                    delays.push(frame.duration);
+                                    delays.push(preview.frame.duration);
+                                    aspect = preview.aspect_ratio;
                                 }
                             }
                         }
@@ -1179,37 +1882,31 @@ impl CanvasApp {
                 if let Ok(mut file) = File::open(&path) {
                     let mut buffer = Vec::new();
                     if file.read_to_end(&mut buffer).is_ok() {
-                        let decoder = webp::AnimDecoder::new(&buffer[..]);
-                        if let Ok(anim) = decoder.decode() {
-                            if anim.len() > 0 {
-                                if let Some(first_frame) = anim.get_frame(0) {
-                                    aspect = first_frame.width() as f32 / first_frame.height() as f32;
-                                }
-                                let mut prev_timestamp = 0;
-                                for frame in &anim {
-                                    let timestamp = frame.get_time_ms();
-                                    let delay_ms = timestamp - prev_timestamp;
-                                    let delay = if delay_ms > 0 {
-                                        delay_ms as f64 / 1000.0
-                                    } else {
-                                        // Fallback for invalid or 0 duration in animation
-                                        if anim.has_animation() {
-                                            0.1
-                                        } else {
-                                            0.0
-                                        }
-                                    };
-                                    prev_timestamp = timestamp;
-
-                                    let img: image::DynamicImage = (&frame).into();
-                                    let buffer = img.to_rgba8();
-                                    let size = [buffer.width() as usize, buffer.height() as usize];
-                                    frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
-                                        size,
-                                        buffer.as_raw(),
-                                    ));
-                                    delays.push(delay);
-                                }
+                        if let Some(preview) = image_decoder::decode_webp_first_frame(&buffer) {
+                            if preview.total_frame_count > 1 {
+                                // Animated WebP - send preview only
+                                let first_frame = egui::ColorImage::from_rgba_unmultiplied(
+                                    [preview.frame.width as usize, preview.frame.height as usize],
+                                    &preview.frame.pixels,
+                                );
+                                let _ = tx.send(ImageLoadData::WebpPreview {
+                                    first_frame,
+                                    frame_durations: preview.frame_durations,
+                                    aspect_ratio: preview.aspect_ratio,
+                                    total_frame_count: preview.total_frame_count,
+                                    path: Some(path_str),
+                                    target_block_id,
+                                });
+                                return;
+                            } else {
+                                // Static WebP - just one frame
+                                let size = [preview.frame.width as usize, preview.frame.height as usize];
+                                frames_data.push(egui::ColorImage::from_rgba_unmultiplied(
+                                    size,
+                                    &preview.frame.pixels,
+                                ));
+                                delays.push(preview.frame.duration);
+                                aspect = preview.aspect_ratio;
                             }
                         }
                     }
@@ -1228,7 +1925,7 @@ impl CanvasApp {
             }
 
             if !frames_data.is_empty() {
-                let _ = tx.send(ImageLoadData {
+                let _ = tx.send(ImageLoadData::Complete {
                     frames: frames_data,
                     frame_delays: delays,
                     aspect_ratio: aspect,
@@ -1263,10 +1960,8 @@ impl CanvasApp {
                     _ => (0, ring * 2 - (i % (ring * 2))),        // left edge, going up
                 };
 
-                let offset = Vec2::new(
-                    (dx as f32 - ring_f) * step_x,
-                    (dy as f32 - ring_f) * step_y,
-                );
+                let offset =
+                    Vec2::new((dx as f32 - ring_f) * step_x, (dy as f32 - ring_f) * step_y);
                 let pos = start_pos + offset;
                 let candidate = Rect::from_min_size(pos.to_pos2(), size);
 
@@ -1370,6 +2065,7 @@ impl CanvasApp {
                                     last_frame_time: 0.0,
                                     counter,
                                     path: Some(path),
+                                    animation_state: AnimationState::Ready,
                                 }
                             }
                         };
@@ -1396,4 +2092,13 @@ impl BlockContent {
             None
         }
     }
+}
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "MA Blocks",
+        options,
+        Box::new(|_cc| Ok(Box::new(CanvasApp::default()) as Box<dyn eframe::App>)),
+    )
 }

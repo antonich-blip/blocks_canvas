@@ -41,6 +41,7 @@ eframe = "0.29"
 egui = { version = "0.29", features = ["serde"] }
 gif = "0.14"
 image = { version = "0.25.9", features = ["jpeg", "png", "avif", "default", "avif-native", "webp"] }
+# libavif-sys with dav1d decoder (has built-in SIMD: SSE2/AVX2/NEON)
 libavif-sys = "0.17.0"
 egui_commonmark = "0.18"
 
@@ -54,3 +55,11 @@ rfd = "0.15"
 # Utilities
 uuid = { version = "1.10", features = ["v4", "fast-rng", "serde"] }
 webp = "0.3"
+
+# --- Release Profile Optimizations ---
+[profile.release]
+# Enable link-time optimization for better performance
+lto = "thin"
+# Optimize for native CPU (enables AVX2, SSE4.2, etc. if available)
+# Note: This makes the binary non-portable to older CPUs
+# codegen-units = 1
