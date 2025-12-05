@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender, TryRecvError};
 use std::thread;
 use uuid::Uuid;
 
@@ -41,6 +41,13 @@ mod avif_decoder {
             if decoder.is_null() {
                 None
             } else {
+                // Enable multi-threaded decoding using all available CPU cores
+                unsafe {
+                    let num_cpus = std::thread::available_parallelism()
+                        .map(|p| p.get() as i32)
+                        .unwrap_or(4);
+                    (*decoder).maxThreads = num_cpus;
+                }
                 Some(Self { decoder })
             }
         }
@@ -137,6 +144,19 @@ mod avif_decoder {
         let mut frames = Vec::new();
         let mut aspect_ratio = 1.0f32;
 
+        // Get the total animation duration and frame count for fallback calculation
+        let image_count = unsafe { (*decoder.as_ptr()).imageCount } as usize;
+        let total_duration = unsafe { (*decoder.as_ptr()).duration };
+
+        // Calculate fallback duration per frame if individual frame timing is invalid
+        let fallback_duration = if image_count > 1 && total_duration > 0.0 {
+            total_duration / image_count as f64
+        } else {
+            0.1 // Default 100ms for animated images with no timing info
+        };
+
+        let mut frame_index: u32 = 0;
+
         // Decode all frames
         while unsafe { libavif_sys::avifDecoderNextImage(decoder.as_ptr()) }
             == libavif_sys::AVIF_RESULT_OK
@@ -158,7 +178,32 @@ mod avif_decoder {
             rgb.convert_from_yuv(image);
 
             let pixels = rgb.extract_pixels();
-            let duration = unsafe { (*decoder.as_ptr()).imageTiming.duration };
+
+            // Get timing using avifDecoderNthImageTiming for more reliable results
+            let duration = unsafe {
+                let mut timing: libavif_sys::avifImageTiming = std::mem::zeroed();
+                let timing_result = libavif_sys::avifDecoderNthImageTiming(
+                    decoder.as_ptr(),
+                    frame_index,
+                    &mut timing,
+                );
+
+                if timing_result == libavif_sys::AVIF_RESULT_OK && timing.duration > 0.0 {
+                    timing.duration
+                } else {
+                    // Fallback: use decoder's imageTiming.duration
+                    let img_timing_duration = (*decoder.as_ptr()).imageTiming.duration;
+                    if img_timing_duration > 0.0 {
+                        img_timing_duration
+                    } else if image_count > 1 {
+                        // For animated images with no per-frame timing, use calculated fallback
+                        fallback_duration
+                    } else {
+                        // Static image
+                        0.0
+                    }
+                }
+            };
 
             frames.push(AvifFrame {
                 pixels,
@@ -166,6 +211,8 @@ mod avif_decoder {
                 height,
                 duration,
             });
+
+            frame_index += 1;
         }
 
         if frames.is_empty() {
@@ -264,6 +311,10 @@ struct CanvasApp {
     image_rx: Receiver<ImageLoadData>,
     /// Sender to clone for background threads
     image_tx: Sender<ImageLoadData>,
+    /// Channel for receiving file paths from file dialog
+    file_dialog_rx: Receiver<Vec<PathBuf>>,
+    /// Sender for file dialog results
+    file_dialog_tx: Sender<Vec<PathBuf>>,
     /// Is the counter tool active?
     counter_tool_active: bool,
     /// Show help window
@@ -319,6 +370,7 @@ enum BlockContentData {
 impl Default for CanvasApp {
     fn default() -> Self {
         let (tx, rx) = channel();
+        let (file_tx, file_rx) = channel();
         Self {
             viewport: Viewport {
                 pan: Vec2::ZERO,
@@ -332,6 +384,8 @@ impl Default for CanvasApp {
             last_chain_interaction: 0.0,
             image_rx: rx,
             image_tx: tx,
+            file_dialog_rx: file_rx,
+            file_dialog_tx: file_tx,
             counter_tool_active: false,
             show_help: false,
             common_mark_cache: CommonMarkCache::default(),
@@ -382,6 +436,23 @@ impl Block {
 impl eframe::App for CanvasApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let mut help_toggled = false;
+
+        // Poll for file dialog results
+        match self.file_dialog_rx.try_recv() {
+            Ok(paths) => {
+                for path in paths {
+                    self.load_image_file(path, ctx.clone(), None);
+                }
+            }
+            Err(TryRecvError::Empty) => {}
+            Err(TryRecvError::Disconnected) => {
+                // Recreate channel if disconnected
+                let (tx, rx) = channel();
+                self.file_dialog_tx = tx;
+                self.file_dialog_rx = rx;
+            }
+        }
+
         // Poll for loaded image data
         while let Ok(data) = self.image_rx.try_recv() {
             if data.frames.is_empty() {
@@ -461,10 +532,20 @@ impl eframe::App for CanvasApp {
             } = &mut block.content
             {
                 if *playing && frames.len() > 1 {
-                    let delay = frame_delays.get(*current_frame_idx).unwrap_or(&0.1);
-                    if time_now - *last_frame_time > *delay {
-                        *current_frame_idx = (*current_frame_idx + 1) % frames.len();
-                        *last_frame_time = time_now;
+                    // Skip frames if we've fallen behind to maintain correct animation speed
+                    let mut elapsed = time_now - *last_frame_time;
+                    while elapsed > 0.0 {
+                        let delay = frame_delays.get(*current_frame_idx).copied().unwrap_or(0.1);
+                        if elapsed >= delay {
+                            elapsed -= delay;
+                            *current_frame_idx = (*current_frame_idx + 1) % frames.len();
+                        } else {
+                            break;
+                        }
+                    }
+                    // Update last_frame_time, accounting for partial frame time remaining
+                    if time_now - *last_frame_time > frame_delays.get(*current_frame_idx).copied().unwrap_or(0.1) {
+                        *last_frame_time = time_now - elapsed;
                     }
                 }
             }
@@ -1023,13 +1104,16 @@ impl CanvasApp {
         });
     }
 
-    fn spawn_image_block(&mut self, ctx: &egui::Context) {
-        if let Some(path) = FileDialog::new()
-            .add_filter("Image", &["png", "jpg", "jpeg", "gif", "avif", "webp"])
-            .pick_file()
-        {
-            self.load_image_file(path, ctx.clone(), None);
-        }
+    fn spawn_image_block(&mut self, _ctx: &egui::Context) {
+        let tx = self.file_dialog_tx.clone();
+        thread::spawn(move || {
+            if let Some(paths) = FileDialog::new()
+                .add_filter("Image", &["png", "jpg", "jpeg", "gif", "avif", "webp"])
+                .pick_files()
+            {
+                let _ = tx.send(paths);
+            }
+        });
     }
 
     fn load_image_file(&self, path: PathBuf, _ctx: egui::Context, target_block_id: Option<Uuid>) {
@@ -1156,17 +1240,44 @@ impl CanvasApp {
     }
 
     fn find_free_rect(&self, start_pos: Vec2, size: Vec2) -> Vec2 {
-        let mut pos = start_pos;
-        let mut offset = 0.0;
-        for _ in 0..10 {
-            let candidate = Rect::from_min_size(pos.to_pos2(), size);
-            if !self.blocks.iter().any(|b| b.rect.intersects(candidate)) {
-                return pos;
-            }
-            offset += 50.0;
-            pos += Vec2::splat(offset);
+        let spacing = 20.0;
+        let step_x = size.x + spacing;
+        let step_y = size.y + spacing;
+
+        // Try positions in a spiral pattern around start_pos
+        // First try the start position itself
+        let candidate = Rect::from_min_size(start_pos.to_pos2(), size);
+        if !self.blocks.iter().any(|b| b.rect.intersects(candidate)) {
+            return start_pos;
         }
-        pos
+
+        // Then try in expanding rings around start position
+        for ring in 1..20 {
+            let ring_f = ring as f32;
+            // Try positions along each ring (right, down, left, up pattern)
+            for i in 0..(ring * 8) {
+                let (dx, dy) = match i / (ring * 2) {
+                    0 => (i % (ring * 2), 0),                     // top edge, going right
+                    1 => (ring * 2, i % (ring * 2)),              // right edge, going down
+                    2 => (ring * 2 - (i % (ring * 2)), ring * 2), // bottom edge, going left
+                    _ => (0, ring * 2 - (i % (ring * 2))),        // left edge, going up
+                };
+
+                let offset = Vec2::new(
+                    (dx as f32 - ring_f) * step_x,
+                    (dy as f32 - ring_f) * step_y,
+                );
+                let pos = start_pos + offset;
+                let candidate = Rect::from_min_size(pos.to_pos2(), size);
+
+                if !self.blocks.iter().any(|b| b.rect.intersects(candidate)) {
+                    return pos;
+                }
+            }
+        }
+
+        // Fallback: place with simple offset
+        start_pos + Vec2::new(step_x, 0.0)
     }
 
     fn save_session(&self) {

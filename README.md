@@ -139,4 +139,9 @@ cargo run
 
 LMB: Move/Toggle_GIF | RMB: Resize | Scroll: Zoom | MMB: Pan
 
-testing.. testing
+## ToDo
+
+- github releases
+- bring it on web
+- ability to delete files on HD from app
+- add vertical scrolling
