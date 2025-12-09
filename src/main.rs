@@ -532,6 +532,14 @@ enum AnimationState {
     },
     /// Currently loading animation frames in background
     Loading { total_frame_count: usize },
+    /// Animation paused due to concurrent limit - can be resumed on click
+    Paused {
+        total_frame_count: usize,
+        frame_durations: Vec<f64>,
+        aspect_ratio: f32,
+        path: String,
+        format: image_decoder::ImageFormat,
+    },
 }
 
 #[derive(Clone)]
@@ -550,6 +558,10 @@ enum BlockContent {
         path: Option<String>,
         /// Animation loading state (for lazy-loaded AVIF animations)
         animation_state: AnimationState,
+        /// First frame ColorImage for paused animations
+        first_frame: Option<egui::ColorImage>,
+        /// Time when animation started playing (for concurrent limit management)
+        playing_start_time: Option<f64>,
     },
 }
 
@@ -595,6 +607,10 @@ struct CanvasApp {
     show_help: bool,
     /// Cache for markdown rendering
     common_mark_cache: CommonMarkCache,
+    /// Maximum number of concurrent animations allowed
+    max_concurrent_animations: usize,
+    /// Current number of playing animations
+    current_concurrent_animations: usize,
 }
 
 /// Data sent from background image loading thread
@@ -699,6 +715,8 @@ impl Default for CanvasApp {
             counter_tool_active: false,
             show_help: false,
             common_mark_cache: CommonMarkCache::default(),
+            max_concurrent_animations: 15,
+            current_concurrent_animations: 0,
         }
     }
 }
@@ -827,6 +845,8 @@ impl eframe::App for CanvasApp {
                                 counter: 0,
                                 path,
                                 animation_state: AnimationState::Ready,
+                                first_frame: frames.first().cloned(),
+                                playing_start_time: None,
                             },
                             chained: false,
                             selected: false,
@@ -860,19 +880,21 @@ impl eframe::App for CanvasApp {
 
                     if let Some(target_id) = target_block_id {
                         if let Some(block) = self.blocks.iter_mut().find(|b| b.id == target_id) {
-                            if let BlockContent::Image {
-                                frames,
-                                frame_delays,
-                                aspect_ratio: ar,
-                                animation_state: anim_state,
-                                ..
-                            } = &mut block.content
-                            {
-                                *frames = vec![texture];
-                                *frame_delays = frame_durations;
-                                *ar = aspect_ratio;
-                                *anim_state = animation_state;
-                            }
+                             if let BlockContent::Image {
+                                 frames,
+                                 frame_delays,
+                                 aspect_ratio: ar,
+                                 animation_state: anim_state,
+                                 first_frame: ff,
+                                 ..
+                             } = &mut block.content
+                             {
+                                 *frames = vec![texture];
+                                 *frame_delays = frame_durations;
+                                 *ar = aspect_ratio;
+                                 *anim_state = animation_state;
+                                 *ff = Some(first_frame);
+                             }
                         }
                     } else {
                         let id = Uuid::new_v4();
@@ -895,6 +917,8 @@ impl eframe::App for CanvasApp {
                                 counter: 0,
                                 path,
                                 animation_state,
+                                first_frame: Some(first_frame),
+                                playing_start_time: None,
                             },
                             chained: false,
                             selected: false,
@@ -1110,6 +1134,15 @@ impl eframe::App for CanvasApp {
             }
         }
 
+        // Update concurrent animation count
+        self.current_concurrent_animations = self.blocks.iter().filter(|b| {
+            if let BlockContent::Image { playing, .. } = &b.content {
+                *playing
+            } else {
+                false
+            }
+        }).count();
+
         // 2. Global Inputs
         let input = ctx.input(|i| i.clone());
         if input.raw_scroll_delta.y.abs() > 0.0 {
@@ -1298,8 +1331,10 @@ impl CanvasApp {
         let secondary_down = ui.input(|i| i.pointer.secondary_down());
         let secondary_pressed =
             ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Secondary));
-        let secondary_released =
-            ui.input(|i| i.pointer.button_released(egui::PointerButton::Secondary));
+    let secondary_released =
+        ui.input(|i| i.pointer.button_released(egui::PointerButton::Secondary));
+
+    let time_now = ui.input(|i| i.time);
 
         // --- Resize Logic ---
         if secondary_pressed && !self.counter_tool_active {
@@ -1504,6 +1539,10 @@ impl CanvasApp {
                         playing,
                         counter,
                         animation_state,
+                        playing_start_time,
+                        frame_delays,
+                        aspect_ratio,
+                        path,
                         ..
                     } => {
                         if let Some(tex) = frames.get(*current_frame_idx) {
@@ -1554,12 +1593,36 @@ impl CanvasApp {
                             }
                         } else if response.clicked() && !close_hovered && !chain_hovered {
                             // Handle animation state transitions
-                            if let AnimationState::NotLoaded { .. } = animation_state {
-                                // Collect request to start loading animation frames
-                                animation_load_requests.push((b_id,));
-                            } else {
-                                // Toggle playing for loaded animations
-                                *playing = !*playing;
+                            match animation_state {
+                                AnimationState::NotLoaded { .. } => {
+                                    // Collect request to start loading animation frames
+                                    animation_load_requests.push((b_id,));
+                                }
+                                AnimationState::Paused { .. } => {
+                                    *playing = true;
+                                    *animation_state = AnimationState::Ready;
+                                    *playing_start_time = Some(time_now);
+                                    self.current_concurrent_animations += 1;
+                                    if self.current_concurrent_animations > self.max_concurrent_animations {
+                                        self.pause_oldest_animation();
+                                    }
+                                }
+                                AnimationState::Ready => {
+                                    if *playing {
+                                        *playing = false;
+                                        self.current_concurrent_animations -= 1;
+                                    } else {
+                                        *playing = true;
+                                        *playing_start_time = Some(time_now);
+                                        self.current_concurrent_animations += 1;
+                                        if self.current_concurrent_animations > self.max_concurrent_animations {
+                                            self.pause_oldest_animation();
+                                        }
+                                    }
+                                }
+                                AnimationState::Loading { .. } => {
+                                    // Do nothing, wait for loading
+                                }
                             }
                         }
                     }
@@ -1975,6 +2038,36 @@ impl CanvasApp {
         start_pos + Vec2::new(step_x, 0.0)
     }
 
+    fn pause_oldest_animation(&mut self) {
+        let mut oldest_idx = None;
+        let mut oldest_time = f64::INFINITY;
+        for (i, block) in self.blocks.iter().enumerate() {
+            if let BlockContent::Image { playing, playing_start_time, .. } = &block.content {
+                if *playing {
+                    if let Some(start) = playing_start_time {
+                        if *start < oldest_time {
+                            oldest_time = *start;
+                            oldest_idx = Some(i);
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(idx) = oldest_idx {
+            if let BlockContent::Image { playing, animation_state, frame_delays, aspect_ratio, path, .. } = &mut self.blocks[idx].content {
+                *playing = false;
+                *animation_state = AnimationState::Paused {
+                    total_frame_count: frame_delays.len(),
+                    frame_durations: frame_delays.clone(),
+                    aspect_ratio: *aspect_ratio,
+                    path: path.clone().unwrap_or_default(),
+                    format: image_decoder::ImageFormat::Avif, // dummy
+                };
+                self.current_concurrent_animations -= 1;
+            }
+        }
+    }
+
     fn save_session(&self) {
         if let Some(mut path) = FileDialog::new().add_filter("JSON", &["json"]).save_file() {
             if path.extension().is_none() {
@@ -2063,10 +2156,12 @@ impl CanvasApp {
                                     playing,
                                     current_frame_idx: 0,
                                     last_frame_time: 0.0,
-                                    counter,
-                                    path: Some(path),
-                                    animation_state: AnimationState::Ready,
-                                }
+                                counter,
+                                path: Some(path),
+                                animation_state: AnimationState::Ready,
+                                first_frame: None,
+                                playing_start_time: None,
+                            }
                             }
                         };
 

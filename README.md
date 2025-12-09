@@ -1,17 +1,20 @@
 ## User Requirements
 
-1.  **Platform:** 'ma_blocks' is a text/image whiteboard-type Rust (desktop) app running on Linux/PopOs/Cosmic-latest/Wayland (and MacOS in future).
+1.  **Platform:** GUI text/image whiteboard-type Rust (desktop) app running on Linux/PopOs/Cosmic-latest/Wayland (and MacOS in future).
 2.  **Canvas:** Unlimited scrolling (infinite canvas). Blocks can be moved in any direction.
-3.  **Collision:** Blocks cannot overlap (including new spawned blocks, grouped/'chained' blocks, and resized blocks), except while being moved/dragged.
+3.  **Collision:** Blocks cannot overlap (including new spawned blocks, grouped/'chained' blocks, and resized blocks), except while being moved/dragged. 
+4. **Align logic:** rows grid alignment with wrap logic (simular to text wrap but with blocks) thas resize blocks in each row to highest member values. Alignment can be on demand (toolbar icon click) and on load (session load or images bulk load).
+5. Dragged/resized blocks placement prevents overlaping so it keeps current (dragged, risized) block(s) position(s) but moves/realignes rest of the block(s)
 4.  **Block Types:**
-    *   **Text:** Editable. Double-click on text to edit, click outside or press 'Esc' to exit edit mode.
-    *   **Image:** Static images and GIFs.
-    *   **GIFs:** Click to toggle animation.
+    *   **Text:** Editable. Double-click on block to edit, click outside or press 'Esc' to exit edit mode.
+    *   **Image:** Static and animation formats.
+    *   **Animations:** Click to toggle animation.
     *   **Future:** Shapes, sound, drawing, arrows.
 5.  **Resizing:**
     *   Image blocks spawn with original aspect ratio and maintain it during resize.
     *   Right Mouse Button (RMB) hold anywhere inside a block resizes it (defaulting to the closest corner).
     *   Resizing/moving is synchronized with mouse movement in real-time.
+    *   'Chained resize' chan mode allows to resize several blocks to same hight while preserving original ratio.
 6.  **Controls & Mappings:**
     *   **LMB + Drag:** Move blocks.
     *   **RMB + Drag:** Resize blocks.
@@ -145,3 +148,8 @@ LMB: Move/Toggle_GIF | RMB: Resize | Scroll: Zoom | MMB: Pan
 - bring it on web
 - ability to delete files on HD from app
 - add vertical scrolling
+- bulk images adding proper images aligning 
+(horizontal align, different stack like in wms)
+- add proper images
+- fix on demand frames adding, decoding, lazy loading cash/temp files clean up after usage/on app close.
+

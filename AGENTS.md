@@ -8,6 +8,11 @@
 - **Lint**: `cargo clippy`
 - **Format**: `cargo fmt`
 
+## Packaging
+- **macOS App Bundle**: `./build_macos.sh`
+- **macOS DMG Installer**: `./build_macos.sh --dmg`
+- **Debian Package**: `cargo deb` (requires `cargo-deb` install)
+
 ## Code Style
 - **Formatting**: Standard Rust (rustfmt). Use 4 spaces for indentation.
 - **Naming**: `Snake_case` for variables/functions, `CamelCase` for types, `SCREAMING_SNAKE_CASE` for constants.

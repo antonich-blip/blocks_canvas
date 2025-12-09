@@ -22,6 +22,11 @@ MA Blocks - A graphical application built with egui.
 [package.metadata.bundle.linux]
 generic = true
 
+# macOS-specific settings
+[package.metadata.bundle.macos]
+frameworks = []
+minimum_system_version = "10.15"
+
 # --- Deb Package Configuration ---
 [package.metadata.deb]
 maintainer = "Your Name <your.email@example.com>"
